@@ -1,0 +1,2133 @@
+```import requests
+import aiohttp
+import asyncio
+import string
+import itertools
+import random
+import secrets
+import time
+from threading import Thread, Lock
+from itertools import cycle
+import os
+from queue import Queue
+
+try:
+    class _Colors:
+        """Menu colors"""
+        @staticmethod
+        def _color_code(code):
+            """Static method to format color codes"""
+            return f'\033[{code}m'
+
+        ENDC: str = _color_code(0)
+        BOLD: str = _color_code(1)
+        UNDERLINE: str = _color_code(4)
+        BLACK: str = _color_code(30)
+        RED: str = _color_code(31)
+        GREEN: str = _color_code(32)
+        YELLOW: str = _color_code(33)
+        BLUE: str = _color_code(34)
+        MAGENTA: str = _color_code(35)
+        CYAN: str = _color_code(36)
+        WHITE: str = _color_code(37)
+        REDBG: str = _color_code(41)
+        GREENBG: str = _color_code(42)
+        YELLOWBG: str = _color_code(43)
+        BLUEBG: str = _color_code(44)
+        MAGENTABG: str = _color_code(45)
+        CYANBG: str = _color_code(46)
+        WHITEBG: str = _color_code(47)
+        GREY: str = _color_code(90)
+        REDGREY: str = _color_code(91)
+        GREENGREY: str = _color_code(92)
+        YELLOWGREY: str = _color_code(93)
+        BLUEGREY: str = _color_code(94)
+        MAGENTAGREY: str = _color_code(95)
+        CYANGREY: str = _color_code(96)
+        WHITEGREY: str = _color_code(97)
+        GREYBG: str = _color_code(100)
+        REDGREYBG: str = _color_code(101)
+        GREENGREYBG: str = _color_code(102)
+        YELLOWGREYBG: str = _color_code(103)
+        BLUEGREYBG: str = _color_code(104)
+        MAGENTAGREYBG: str = _color_code(105)
+        CYANGREYBG: str = _color_code(106)
+        WHITEGREYBG: str = _color_code(107)
+
+    Colors = _Colors()
+
+    # Global variables
+    proxies = []
+    proxy_cycle = None
+    checked_count = 0
+    available_count = 0
+    lock = Lock()
+    usernames_to_check = []
+    DONE = False
+    use_proxy_mode = None  # None = auto-detect, True = use proxy, False = use direct
+    file_write_queue = None  # Queue for thread-safe file writing
+    file_writer_thread = None
+    rate_limit_detected = False  # Track if we're being rate limited
+    consecutive_errors = 0  # Track consecutive errors
+    proxy_failures = 0  # Track consecutive proxy failures
+    max_proxy_failures = 5  # Switch to direct after this many proxy failures (reduced for faster detection)
+
+    def load_proxies(file_path='proxies.txt'):
+        """Load proxies from file"""
+        global proxies, proxy_cycle
+        if not os.path.exists(file_path):
+            print(f"{Colors.YELLOW}Warning: {file_path} not found. Running without proxy.{Colors.ENDC}")
+            return []
+        
+        try:
+            with open(file_path, 'r') as file:
+                proxies = [line.strip() for line in file if line.strip()]
+            if proxies:
+                proxy_cycle = cycle(proxies)
+                print(f"{Colors.GREEN}Loaded {len(proxies)} proxies.{Colors.ENDC}")
+            return proxies
+        except Exception as e:
+            print(f"{Colors.RED}Error loading proxies: {e}{Colors.ENDC}")
+            return []
+
+    def get_proxy():
+        """Get next proxy from rotation"""
+        global proxy_cycle, proxies
+        if proxies and proxy_cycle:
+            return next(proxy_cycle)
+        return None
+
+    # Create a session for connection pooling (faster)
+    session = requests.Session()
+    aio_session = None  # Async session (created when needed)
+    platform = "discord"  # Global variable to track which platform we're checking
+    
+    def check_roblox_username_availability(username, max_retries=2):
+        """Check if Roblox username is available with retry logic.
+
+        Note: Roblox can be picky and occasionally return unexpected errors or rate limits.
+        To keep the checker smooth, any non-clear response is treated as TAKEN instead of ERROR.
+        """
+        global proxies, session, use_proxy_mode, proxy_failures, max_proxy_failures
+        url = "https://auth.roblox.com/v1/usernames/validate"
+        
+        headers = {
+            'Content-Type': 'application/json',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'application/json',
+            'Origin': 'https://www.roblox.com',
+            'Referer': 'https://www.roblox.com/',
+        }
+        
+        payload = {
+            "username": username,
+            "context": "Signup"
+        }
+        
+        global use_proxy_mode
+        
+        if use_proxy_mode is None:
+            request_use_proxy = bool(proxies)
+        else:
+            request_use_proxy = use_proxy_mode
+        
+        use_session = True
+        for attempt in range(max_retries):
+            proxy_dict = None
+            if request_use_proxy:
+                proxy = get_proxy()
+                if proxy:
+                    if '://' not in proxy:
+                        proxy = f"http://{proxy}"
+                    proxy_dict = {
+                        "http": proxy,
+                        "https": proxy
+                    }
+            
+            try:
+                if use_session:
+                    try:
+                        response = session.post(
+                            url,
+                            json=payload,
+                            headers=headers,
+                            proxies=proxy_dict,
+                            timeout=3,
+                            allow_redirects=False
+                        )
+                    except (requests.exceptions.ConnectionError, requests.exceptions.ChunkedEncodingError, requests.exceptions.Timeout, AttributeError, requests.exceptions.RequestException) as e:
+                        try:
+                            session.close()
+                        except:
+                            pass
+                        session = requests.Session()
+                        use_session = False
+                        response = requests.post(
+                            url,
+                            json=payload,
+                            headers=headers,
+                            proxies=proxy_dict,
+                            timeout=3,
+                            allow_redirects=False
+                        )
+                else:
+                    response = requests.post(
+                        url,
+                        json=payload,
+                        headers=headers,
+                        proxies=proxy_dict,
+                        timeout=3,
+                        allow_redirects=False
+                    )
+                
+                if response.status_code == 200:
+                    if not request_use_proxy and use_proxy_mode is None:
+                        use_proxy_mode = False
+                    
+                    try:
+                        data = response.json()
+                        # Roblox returns code 0 if username is available, non-zero if taken/invalid
+                        if isinstance(data, dict):
+                            code = data.get('code', -1)
+                            message = data.get('message', '').lower()
+                            
+                            if code == 0:
+                                return True  # Available
+                            else:
+                                # Check if it's inappropriate (code 3 or message contains inappropriate keywords)
+                                if code == 3 or 'inappropriate' in message or 'not allowed' in message or 'forbidden' in message or 'banned' in message:
+                                    return "inappropriate"  # Inappropriate username
+                                else:
+                                    return False  # Taken
+                        # If response format is weird, just treat as taken
+                        return False
+                    except (ValueError, AttributeError, TypeError):
+                        # Couldn't parse JSON; treat as taken instead of error
+                        return False
+                
+                # 400 / 401 / 403 / 404 / 422 etc – any client-side issue: treat as taken
+                if 400 <= response.status_code < 500:
+                    return False
+                
+                # 5xx – temporary server issue, retry a couple of times then treat as taken
+                if 500 <= response.status_code < 600:
+                    if attempt < max_retries - 1:
+                        time.sleep(0.03)
+                        continue
+                    return False
+                    
+            except requests.exceptions.ProxyError:
+                # Network / proxy problems – retry then treat as taken
+                if request_use_proxy and attempt < max_retries - 1:
+                    request_use_proxy = False
+                    time.sleep(0.05)
+                    continue
+                if attempt < max_retries - 1:
+                    if use_session and attempt >= 2:
+                        try:
+                            session.close()
+                        except:
+                            pass
+                        session = requests.Session()
+                    time.sleep(0.05)
+                    continue
+                return False
+            except (requests.exceptions.Timeout, requests.exceptions.ConnectionError, requests.exceptions.ChunkedEncodingError):
+                if attempt < max_retries - 1:
+                    if use_session and attempt >= 2:
+                        try:
+                            session.close()
+                        except:
+                            pass
+                        session = requests.Session()
+                    time.sleep(0.03)
+                    continue
+                return False
+            except requests.exceptions.RequestException:
+                if attempt < max_retries - 1:
+                    if use_session and attempt >= 2:
+                        try:
+                            session.close()
+                        except:
+                            pass
+                        session = requests.Session()
+                    time.sleep(0.05)
+                    continue
+                return False
+            except (AttributeError, ValueError, KeyError, TypeError):
+                if attempt < max_retries - 1:
+                    if use_session:
+                        try:
+                            session.close()
+                        except:
+                            pass
+                        session = requests.Session()
+                    time.sleep(0.05)
+                    continue
+                return False
+            except Exception:
+                if attempt < max_retries - 1:
+                    if use_session and attempt >= 2:
+                        try:
+                            session.close()
+                        except:
+                            pass
+                        session = requests.Session()
+                    time.sleep(0.05)
+                    continue
+                # Any unknown problem – just say taken so we don't spam [ERROR]
+                return False
+        
+        # All retries exhausted – treat as taken instead of error
+        return False
+    
+    async def async_check_roblox_username_availability(username, session, max_retries=1):
+        """Async version: Check if Roblox username is available with retry logic."""
+        try:
+            global proxies, use_proxy_mode, proxy_failures, max_proxy_failures
+            url = "https://auth.roblox.com/v1/usernames/validate"
+            
+            headers = {
+                'Content-Type': 'application/json',
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Accept': 'application/json',
+                'Origin': 'https://www.roblox.com',
+                'Referer': 'https://www.roblox.com/',
+            }
+            
+            payload = {
+                "username": username,
+                "context": "Signup"
+            }
+            
+            if use_proxy_mode is None:
+                request_use_proxy = bool(proxies)
+            else:
+                request_use_proxy = use_proxy_mode
+            
+            for attempt in range(max_retries):
+                proxy = None
+                if request_use_proxy:
+                    proxy = get_proxy()
+                    if proxy and '://' not in proxy:
+                        proxy = f"http://{proxy}"
+                
+                try:
+                    timeout = aiohttp.ClientTimeout(total=1, connect=0.5)
+                    async with session.post(
+                        url,
+                        json=payload,
+                        headers=headers,
+                        proxy=proxy,
+                        timeout=timeout,
+                        allow_redirects=False
+                    ) as response:
+                        if response.status == 200:
+                            if not request_use_proxy and use_proxy_mode is None:
+                                use_proxy_mode = False
+                            
+                            try:
+                                data = await response.json()
+                                if isinstance(data, dict):
+                                    code = data.get('code', -1)
+                                    message = data.get('message', '').lower()
+                                    
+                                    if code == 0:
+                                        return True
+                                    else:
+                                        if code == 3 or 'inappropriate' in message or 'not allowed' in message or 'forbidden' in message or 'banned' in message:
+                                            return "inappropriate"
+                                        else:
+                                            return False
+                                return False
+                            except (ValueError, AttributeError, TypeError):
+                                return False
+                        
+                        if 400 <= response.status < 500:
+                            return False
+                        
+                        if 500 <= response.status < 600:
+                            if attempt < max_retries - 1:
+                                await asyncio.sleep(0.01)  # Minimal delay
+                                continue
+                            return False
+                            
+                except (aiohttp.ClientError, asyncio.TimeoutError, Exception) as e:
+                    # Check if this is a proxy error and track failures
+                    if request_use_proxy and proxy:
+                        with lock:
+                            proxy_failures += 1
+                            if proxy_failures >= max_proxy_failures:
+                                use_proxy_mode = False
+                                print(f"{Colors.YELLOW}[PROXY] Detected {proxy_failures} consecutive proxy failures. Switching to direct connection...{Colors.ENDC}")
+                                proxy_failures = 0  # Reset counter
+                        request_use_proxy = False  # Switch to direct for this request
+                    
+                    if attempt < max_retries - 1:
+                        # No delay - retry immediately
+                        continue
+                    return False
+            
+            return False
+        except Exception:
+            return False  # Catch any unexpected exceptions and treat as taken
+    
+    def check_username_availability(username, max_retries=2):
+        """Check if Discord username is available with retry logic - optimized for speed and reliability"""
+        global proxies, session, rate_limit_detected, consecutive_errors, platform
+        
+        # Route to appropriate function based on platform
+        if platform == "roblox":
+            return check_roblox_username_availability(username, max_retries)
+        
+        # Discord checking (original code)
+        url = "https://discord.com/api/v9/unique-username/username-attempt-unauthed"
+        
+        headers = {
+            'Content-Type': 'application/json',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'application/json',
+            'Origin': 'https://discord.com',
+            'Referer': 'https://discord.com/',
+            'X-Discord-Locale': 'en-US',
+            'X-Super-Properties': 'eyJvcyI6IldpbmRvd3MiLCJicm93c2VyIjoiQ2hyb21lIiwiZGV2aWNlIjoiIiwic3lzdGVtX2xvY2FsZSI6ImVuLVVTIiwiYnJvd3Nlcl91c2VyX2FnZW50IjoiTW96aWxsYS81LjAgKFdpbmRvd3MgTlQgMTAuMDsgV2luNjQ7IHg2NCkgQXBwbGVXZWJLaXQvNTM3LjM2IChLSFRNTCwgbGlrZSBHZWNrKSBDaHJvbWUvMTIwLjAuMC4wIFNhZmFyaS81MzcuMzYiLCJicm93c2VyX3ZlcnNpb24iOiIxMjAuMC4wLjAiLCJvc192ZXJzaW9uIjoiMTAiLCJyZWZlcnJlciI6IiIsInJlZmVycmluZ19kb21haW4iOiIiLCJyZWZlcnJpbmdfZG9tYWluX3BhdGgiOiIiLCJyZWxlYXNlX2NoYW5uZWwiOiJzdGFibGUiLCJjbGllbnRfYnVpbGRfbnVtYmVyIjo0MjE2MywiY2xpZW50X2V2ZW50X3NvdXJjZSI6bnVsbH0='
+        }
+        
+        payload = {
+            "username": username
+        }
+        
+        global use_proxy_mode
+        
+        # Smart proxy usage: use proxy if available (Discord may block direct connections)
+        # But try to minimize usage by only using when necessary
+        if use_proxy_mode is None:
+            # First request: if we have proxies, use them (Discord often blocks direct)
+            # If no proxies, try direct
+            request_use_proxy = bool(proxies)
+        else:
+            # Use the detected mode
+            request_use_proxy = use_proxy_mode
+        
+        # Try with session first, fallback to direct requests if session fails
+        use_session = True
+        for attempt in range(max_retries):
+            proxy_dict = None
+            if request_use_proxy:
+                proxy = get_proxy()
+                if proxy:
+                    # Handle different proxy formats
+                    if '://' not in proxy:
+                        proxy = f"http://{proxy}"
+                    proxy_dict = {
+                        "http": proxy,
+                        "https": proxy
+                    }
+            
+            try:
+                # Try with session first, fallback to direct request if session has issues
+                if use_session:
+                    try:
+                        response = session.post(
+                            url,
+                            json=payload,
+                            headers=headers,
+                            proxies=proxy_dict,
+                            timeout=1,  # Optimized timeout for maximum speed
+                            allow_redirects=False
+                        )
+                    except (requests.exceptions.ConnectionError, requests.exceptions.ChunkedEncodingError, requests.exceptions.Timeout, AttributeError, requests.exceptions.RequestException) as e:
+                        # Session might be corrupted, recreate it and try direct request
+                        try:
+                            session.close()
+                        except:
+                            pass
+                        session = requests.Session()
+                        use_session = False
+                        # Fall through to direct request
+                        try:
+                            response = requests.post(
+                                url,
+                                json=payload,
+                                headers=headers,
+                                proxies=proxy_dict,
+                                timeout=1,
+                                allow_redirects=False
+                            )
+                        except:
+                            # If direct request also fails, raise to outer exception handler
+                            raise
+                else:
+                    # Use direct request (no session)
+                    response = requests.post(
+                        url,
+                        json=payload,
+                        headers=headers,
+                        proxies=proxy_dict,
+                        timeout=2,
+                        allow_redirects=False
+                    )
+                
+                # Status 200 - check the response
+                if response.status_code == 200:
+                    # Reset rate limit detection on success
+                    if rate_limit_detected:
+                        consecutive_errors = 0
+                        rate_limit_detected = False
+                    # If we successfully got a response with direct connection, keep using direct
+                    if not request_use_proxy and use_proxy_mode is None:
+                        use_proxy_mode = False  # Direct connection works, stick with it
+                    
+                    try:
+                        data = response.json()
+                        # Check if username is available
+                        if isinstance(data, dict):
+                            # Some endpoints return 'available' field
+                            if 'available' in data:
+                                return data.get('available') == True
+                            # Some endpoints return 'taken' field (inverted)
+                            elif 'taken' in data:
+                                return data.get('taken') == False
+                            # Some endpoints return 'valid' field
+                            elif 'valid' in data:
+                                return data.get('valid') == True
+                            # If dict but no expected fields, assume taken (conservative)
+                            else:
+                                return False
+                        # Sometimes response is just a boolean
+                        elif isinstance(data, bool):
+                            return data
+                        # If response is not dict or bool, assume taken
+                        else:
+                            return False
+                    except (ValueError, AttributeError, TypeError):
+                        # Response is not JSON, might be empty or invalid
+                        # Try to parse as text
+                        try:
+                            text = response.text.lower().strip() if hasattr(response, 'text') and response.text else ''
+                            if text in ['true', 'false']:
+                                return text == 'true'
+                        except:
+                            pass
+                        # If can't parse, assume taken (conservative)
+                        return False
+                
+                # Status 400 - username is taken or invalid
+                elif response.status_code == 400:
+                    return False
+                
+                # Status 401/403 - authentication required or forbidden
+                elif response.status_code in [401, 403]:
+                    # Endpoint might require authentication, try without proxy
+                    if request_use_proxy and attempt < max_retries - 1:
+                        request_use_proxy = False
+                        # No delay - immediate retry for speed
+                        continue
+                    elif attempt < max_retries - 1:
+                        # Only recreate session if multiple attempts failed
+                        if use_session and attempt >= 2:
+                            try:
+                                session.close()
+                            except:
+                                pass
+                            session = requests.Session()
+                        # No delay - immediate retry for speed
+                        continue
+                    return None
+                
+                # Status 429 - rate limited - try with proxy if available, with fixed delay
+                elif response.status_code == 429:
+                    rate_limit_detected = True
+                    if not request_use_proxy and proxies and attempt < max_retries - 1:
+                        request_use_proxy = True
+                        if use_proxy_mode is None:
+                            use_proxy_mode = True
+                        time.sleep(0.02)  # Minimal delay for speed
+                        continue
+                    elif attempt < max_retries - 1:
+                        # Already using proxy or no proxy, wait a bit
+                        time.sleep(0.03)  # Minimal delay for speed
+                        continue
+                    return None
+                
+                # Status 500-599 - server errors, retry
+                elif 500 <= response.status_code < 600:
+                    if attempt < max_retries - 1:
+                        # Only recreate session if multiple attempts failed
+                        if use_session and attempt >= 2:
+                            try:
+                                session.close()
+                            except:
+                                pass
+                            session = requests.Session()
+                        time.sleep(0.01)  # Minimal delay for speed
+                        continue
+                    return None
+                
+                # Other status codes
+                else:
+                    if attempt < max_retries - 1:
+                        # Only recreate session if multiple attempts failed
+                        if use_session and attempt >= 2:
+                            try:
+                                session.close()
+                            except:
+                                pass
+                            session = requests.Session()
+                        # No delay - immediate retry for speed
+                        continue
+                    return None
+                    
+            except requests.exceptions.ProxyError:
+                # Proxy error - track failures and switch to direct
+                if request_use_proxy:
+                    with lock:
+                        proxy_failures += 1
+                        if proxy_failures >= max_proxy_failures:
+                            use_proxy_mode = False
+                            print(f"{Colors.YELLOW}[PROXY] Detected {proxy_failures} consecutive proxy failures. Switching to direct connection...{Colors.ENDC}")
+                            proxy_failures = 0
+                    request_use_proxy = False
+                
+                if attempt < max_retries - 1:
+                    # Retry without proxy immediately
+                    continue
+                return None
+            except (requests.exceptions.Timeout, requests.exceptions.ConnectionError, requests.exceptions.ChunkedEncodingError) as e:
+                # Timeout or connection error - if using proxy, track failures
+                if request_use_proxy:
+                    with lock:
+                        proxy_failures += 1
+                        if proxy_failures >= max_proxy_failures:
+                            use_proxy_mode = False
+                            request_use_proxy = False
+                            print(f"{Colors.YELLOW}[PROXY] Too many proxy failures, switching to direct connections{Colors.ENDC}")
+                if attempt < max_retries - 1:
+                    # Only recreate session if multiple attempts failed
+                    if use_session and attempt >= 2:
+                        try:
+                            session.close()
+                        except:
+                            pass
+                        session = requests.Session()
+                    time.sleep(0.03)  # Optimized delay for speed
+                    continue
+                return None
+            except requests.exceptions.RequestException as e:
+                # Other request exceptions - retry with minimal delay
+                if attempt < max_retries - 1:
+                    # Only recreate session if multiple attempts failed
+                    if use_session and attempt >= 2:
+                        try:
+                            session.close()
+                        except:
+                            pass
+                        session = requests.Session()
+                    time.sleep(0.01)  # Optimized delay for speed
+                    continue
+                return None
+            except (AttributeError, ValueError, KeyError, TypeError) as e:
+                # Session or parsing errors - recreate session and retry
+                if attempt < max_retries - 1:
+                    if use_session:
+                        try:
+                            session.close()
+                        except:
+                            pass
+                        session = requests.Session()
+                    time.sleep(0.01)  # Optimized delay for speed
+                    continue
+                return None
+            except Exception as e:
+                # Unexpected error - retry with minimal delay
+                if attempt < max_retries - 1:
+                    # Only recreate session if multiple attempts failed
+                    if use_session and attempt >= 2:
+                        try:
+                            session.close()
+                        except:
+                            pass
+                        session = requests.Session()
+                    time.sleep(0.01)  # Optimized delay for speed
+                    continue
+                return None
+        
+        # All retries exhausted
+        return None
+    
+    async def async_check_username_availability(username, session, max_retries=2):
+        """Async version: Check if Discord/Roblox username is available with retry logic"""
+        global proxies, rate_limit_detected, consecutive_errors, platform, use_proxy_mode
+        
+        try:
+            if platform == "roblox":
+                return await async_check_roblox_username_availability(username, session, max_retries)
+            
+            # Discord checking
+            url = "https://discord.com/api/v9/unique-username/username-attempt-unauthed"
+            
+            headers = {
+                'Content-Type': 'application/json',
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Accept': 'application/json',
+                'Origin': 'https://discord.com',
+                'Referer': 'https://discord.com/',
+                'X-Discord-Locale': 'en-US',
+                'X-Super-Properties': 'eyJvcyI6IldpbmRvd3MiLCJicm93c2VyIjoiQ2hyb21lIiwiZGV2aWNlIjoiIiwic3lzdGVtX2xvY2FsZSI6ImVuLVVTIiwiYnJvd3Nlcl91c2VyX2FnZW50IjoiTW96aWxsYS81LjAgKFdpbmRvd3MgTlQgMTAuMDsgV2luNjQ7IHg2NCkgQXBwbGVXZWJLaXQvNTM3LjM2IChLSFRNTCwgbGlrZSBHZWNrKSBDaHJvbWUvMTIwLjAuMC4wIFNhZmFyaS81MzcuMzYiLCJicm93c2VyX3ZlcnNpb24iOiIxMjAuMC4wLjAiLCJvc192ZXJzaW9uIjoiMTAiLCJyZWZlcnJlciI6IiIsInJlZmVycmluZ19kb21haW4iOiIiLCJyZWZlcnJpbmdfZG9tYWluX3BhdGgiOiIiLCJyZWxlYXNlX2NoYW5uZWwiOiJzdGFibGUiLCJjbGllbnRfYnVpbGRfbnVtYmVyIjo0MjE2MywiY2xpZW50X2V2ZW50X3NvdXJjZSI6bnVsbH0='
+            }
+            
+            payload = {"username": username}
+            
+            if use_proxy_mode is None:
+                request_use_proxy = bool(proxies)
+            else:
+                request_use_proxy = use_proxy_mode
+            
+            for attempt in range(max_retries):
+                proxy = None
+                if request_use_proxy:
+                    proxy = get_proxy()
+                    if proxy and '://' not in proxy:
+                        proxy = f"http://{proxy}"
+                
+                try:
+                    timeout = aiohttp.ClientTimeout(total=1, connect=0.5)
+                    async with session.post(
+                        url,
+                        json=payload,
+                        headers=headers,
+                        proxy=proxy,
+                        timeout=timeout,
+                        allow_redirects=False
+                    ) as response:
+                        if response.status == 200:
+                            if rate_limit_detected:
+                                consecutive_errors = 0
+                                rate_limit_detected = False
+                            # Reset proxy failure counter on success
+                            if request_use_proxy:
+                                with lock:
+                                    proxy_failures = 0
+                            if not request_use_proxy and use_proxy_mode is None:
+                                use_proxy_mode = False
+                            
+                            try:
+                                data = await response.json()
+                                if isinstance(data, dict):
+                                    if 'available' in data:
+                                        return data.get('available') == True
+                                    elif 'taken' in data:
+                                        return data.get('taken') == False
+                                    elif 'valid' in data:
+                                        return data.get('valid') == True
+                                    else:
+                                        return False
+                                elif isinstance(data, bool):
+                                    return data
+                                else:
+                                    return False
+                            except (ValueError, AttributeError, TypeError):
+                                try:
+                                    text = (await response.text()).lower().strip()
+                                    if text in ['true', 'false']:
+                                        return text == 'true'
+                                except:
+                                    pass
+                                return False
+                        
+                        elif response.status == 400:
+                            return False  # Immediate return, no retry
+                        
+                        elif response.status in [401, 403]:
+                            return False  # Immediate return, no retry needed
+                        
+                        elif response.status == 429:
+                            rate_limit_detected = True
+                            if not request_use_proxy and proxies and attempt < max_retries - 1:
+                                request_use_proxy = True
+                                if use_proxy_mode is None:
+                                    use_proxy_mode = True
+                                await asyncio.sleep(0.02)  # Minimal delay
+                                continue
+                            elif attempt < max_retries - 1:
+                                await asyncio.sleep(0.03)  # Minimal delay
+                                continue
+                            return False  # Treat as taken instead of error
+                        
+                        elif 500 <= response.status < 600:
+                            if attempt < max_retries - 1:
+                                await asyncio.sleep(0.01)  # Minimal delay
+                                continue
+                            return False  # Treat as taken instead of error
+                        else:
+                            return False  # Immediate return for unknown status
+                        
+                except (aiohttp.ClientError, asyncio.TimeoutError, Exception) as e:
+                    # If using proxy and getting connection errors, track failures
+                    if request_use_proxy:
+                        with lock:
+                            proxy_failures += 1
+                            if proxy_failures >= max_proxy_failures:
+                                use_proxy_mode = False
+                                request_use_proxy = False
+                                print(f"{Colors.YELLOW}[PROXY] Too many failures, switching to direct connections{Colors.ENDC}")
+                    if attempt < max_retries - 1:
+                        # No delay for connection errors - retry immediately
+                        continue
+                    return False  # Treat as taken instead of error
+            
+            return False  # All retries exhausted, treat as taken
+        except Exception:
+            return False  # Catch any unexpected exceptions and treat as taken
+
+    def generate_usernames(length, count, letters_only=False, allow_repeats=True, special_char=None):
+        """Generate usernames of specified length.
+        
+        For 3 and 4 character usernames: generates ALL possible combinations exhaustively.
+        For other lengths: generates random usernames.
+
+        - If letters_only is True  -> only a-z
+        - If letters_only is False -> a-z + 0-9 AND every username will contain at least one letter and one digit.
+        """
+        if letters_only:
+            characters = string.ascii_lowercase
+        else:
+            characters = string.ascii_lowercase + string.digits
+
+        def _has_letter_and_digit(s: str) -> bool:
+            """Return True if s contains at least one letter and one digit."""
+            has_letter = any(c.isalpha() for c in s)
+            has_digit = any(c.isdigit() for c in s)
+            return has_letter and has_digit
+        
+        # For 3 and 4 character usernames, generate ALL possible combinations
+        if length in [3, 4]:
+            usernames = []
+            
+            if allow_repeats:
+                # Generate repeater usernames (exactly 2 consecutive identical characters) - 100% exhaustive
+                print(f"{Colors.CYAN}Generating ALL possible repeater username combinations (exactly 2 consecutive identical characters, 100% exhaustive)...{Colors.ENDC}")
+                num_repeats = 2
+                remaining = length - num_repeats
+                
+                # Generate all combinations with exactly 2 consecutive identical characters
+                for repeat_char in characters:
+                    # Create the repeated sequence (exactly 2 back-to-back)
+                    repeat_sequence = repeat_char * num_repeats
+                    
+                    # Get other characters (excluding repeat_char to avoid 3+ in a row)
+                    other_characters = [c for c in characters if c != repeat_char]
+                    
+                    if remaining > 0:
+                        # Generate all combinations of remaining characters
+                        for other_combo in itertools.permutations(other_characters, remaining):
+                            other_chars = list(other_combo)
+                            
+                            # Place repeated sequence in each possible position
+                            for pos in range(remaining + 1):
+                                if pos == 0:
+                                    # Repeated chars at start (e.g., "ggkq", "33bn")
+                                    username = repeat_sequence + ''.join(other_chars)
+                                elif pos == remaining:
+                                    # Repeated chars at end (e.g., "kqgg", "bn33")
+                                    username = ''.join(other_chars) + repeat_sequence
+                                else:
+                                    # Repeated chars in middle (e.g., "kggq", "b33n")
+                                    username = ''.join(other_chars[:pos]) + repeat_sequence + ''.join(other_chars[pos:])
+                                
+                                # If we are in letters+numbers mode, enforce at least one letter and one digit
+                                if not letters_only and not _has_letter_and_digit(username):
+                                    continue
+                                
+                                usernames.append(username)
+                    else:
+                        # Only happens for 2-character usernames (e.g., "aa", "33")
+                        username = repeat_sequence
+                        usernames.append(username)
+            else:
+                # Generate ALL combinations without repeats (permutations) (100% exhaustive)
+                print(f"{Colors.CYAN}Generating ALL possible combinations without repeats (unique characters only, 100% exhaustive)...{Colors.ENDC}")
+                for combo in itertools.permutations(characters, length):
+                    username = ''.join(combo)
+                    
+                    # If we are in letters+numbers mode, enforce at least one letter and one digit
+                    if not letters_only and not _has_letter_and_digit(username):
+                        continue
+                    
+                    usernames.append(username)
+            
+            # If special_char is provided, also generate ALL combinations with special char in each position (100% exhaustive)
+            if special_char:
+                print(f"{Colors.CYAN}Generating ALL repeater combinations with special character '{special_char}' (100% exhaustive)...{Colors.ENDC}")
+                special_usernames = []
+                num_repeats = 2
+                remaining = length - num_repeats
+                
+                if allow_repeats:
+                    # Generate repeater usernames with special char variations
+                    for repeat_char in characters:
+                        # Create the repeated sequence (exactly 2 back-to-back)
+                        repeat_sequence = repeat_char * num_repeats
+                        
+                        # Get other characters (excluding repeat_char to avoid 3+ in a row)
+                        other_characters = [c for c in characters if c != repeat_char]
+                        
+                        if remaining > 0:
+                            # Generate all combinations of remaining characters
+                            for other_combo in itertools.permutations(other_characters, remaining):
+                                other_chars = list(other_combo)
+                                
+                                # Place repeated sequence in each possible position
+                                for pos in range(remaining + 1):
+                                    if pos == 0:
+                                        username = repeat_sequence + ''.join(other_chars)
+                                    elif pos == remaining:
+                                        username = ''.join(other_chars) + repeat_sequence
+                                    else:
+                                        username = ''.join(other_chars[:pos]) + repeat_sequence + ''.join(other_chars[pos:])
+                                    
+                                    # Find the repeat sequence position
+                                    repeat_start = username.find(repeat_sequence)
+                                    protected_idx = set()
+                                    if repeat_start != -1:
+                                        protected_idx = set(range(repeat_start, repeat_start + num_repeats))
+                                    
+                                    # Replace one character that's not in the repeat sequence with special char
+                                    selectable = [i for i in range(len(username)) if i not in protected_idx]
+                                    if selectable:
+                                        # Generate all variations with special char in each non-protected position
+                                        for replace_idx in selectable:
+                                            special_username = username[:replace_idx] + special_char + username[replace_idx + 1:]
+                                            
+                                            # If we are in letters+numbers mode, enforce at least one letter and one digit
+                                            if not letters_only and not _has_letter_and_digit(special_username):
+                                                continue
+                                            
+                                            special_usernames.append(special_username)
+                        else:
+                            # Only happens for 2-character usernames
+                            username = repeat_sequence
+                            # Replace one character with special char
+                            for pos in range(length):
+                                special_username = username[:pos] + special_char + username[pos + 1:]
+                                special_usernames.append(special_username)
+                else:
+                    # Generate ALL base combinations without repeats
+                    for combo in itertools.permutations(characters, base_length):
+                        base_username = ''.join(combo)
+                        
+                        # Insert special char in each possible position
+                        for pos in range(length):
+                            if pos == 0:
+                                username = special_char + base_username
+                            elif pos == length - 1:
+                                username = base_username + special_char
+                            else:
+                                username = base_username[:pos] + special_char + base_username[pos:]
+                            
+                            # If we are in letters+numbers mode, enforce at least one letter and one digit
+                            if not letters_only and not _has_letter_and_digit(username):
+                                continue
+                            
+                            special_usernames.append(username)
+                
+                # Combine regular and special char usernames
+                usernames.extend(special_usernames)
+            
+            # Remove duplicates (preserves order while removing duplicates)
+            usernames = list(dict.fromkeys(usernames))
+            
+            # Show some examples to verify the generation
+            if usernames:
+                examples = usernames[:10] if len(usernames) >= 10 else usernames
+                examples_str = ', '.join(examples)
+                print(f"{Colors.GREEN}Generated {len(usernames)} total combinations (100% exhaustive - every single combination). Examples: {examples_str}...{Colors.ENDC}")
+            
+            # For 3 and 4 character usernames, generate ALL combinations (exhaustive)
+            # But limit to count if specified (if count is None or 0, return all)
+            original_count = len(usernames)
+            if count is not None and count > 0 and len(usernames) > count:
+                # Randomly sample the specified count from all combinations
+                rng = secrets.SystemRandom()
+                usernames = rng.sample(usernames, count)
+                print(f"{Colors.YELLOW}Sampled {count} usernames from {original_count} total combinations.{Colors.ENDC}")
+            
+            # Shuffle the list to ensure random order
+            secrets.SystemRandom().shuffle(usernames)
+            return usernames
+        
+        # For other lengths, use the original random generation method
+        if allow_repeats:
+            # Allow repeating characters within username (e.g., 33b, 6nn, ggzk)
+            # Generate usernames that actually have repeating characters back-to-back
+            usernames = []
+            rng = secrets.SystemRandom()
+            while len(usernames) < count:
+                # Pick a random character to repeat (back-to-back, exactly 2 times)
+                repeat_char = rng.choice(characters)
+                # Exactly 2 repeating characters back-to-back
+                num_repeats = 2
+                # Fill remaining positions with random characters (excluding repeat_char to avoid 3+ in a row)
+                remaining = length - num_repeats
+                # Use characters that don't include the repeat_char to prevent 3+ consecutive
+                other_characters = [c for c in characters if c != repeat_char]
+                if remaining > 0:
+                    if remaining <= len(other_characters):
+                        # Ensure all remaining characters are unique so we never get two pairs
+                        other_chars = rng.sample(other_characters, remaining)
+                    else:
+                        # Fallback (shouldn't happen with current username lengths); allow repeats but avoid direct duplicates in a row
+                        other_chars = []
+                        while len(other_chars) < remaining:
+                            candidate = rng.choice(other_characters)
+                            if not other_chars or other_chars[-1] != candidate:
+                                other_chars.append(candidate)
+                else:
+                    other_chars = []
+                
+                # Create the repeated sequence (exactly 2 back-to-back)
+                repeat_sequence = repeat_char * num_repeats
+                
+                # Combine: decide where to place the repeated sequence (exactly 2 chars)
+                if remaining == 0:
+                    # Only happens for 2-character usernames (e.g., "aa", "33")
+                    username = repeat_sequence
+                else:
+                    # Place repeated sequence and other chars
+                    # Randomly decide position: start, middle, or end
+                    position = rng.choice(['start', 'middle', 'end'])
+                    if position == 'start':
+                        # Repeated chars at start (e.g., "ggzk", "33b")
+                        username = repeat_sequence + ''.join(other_chars)
+                    elif position == 'end':
+                        # Repeated chars at end (e.g., "zgg", "b33")
+                        username = ''.join(other_chars) + repeat_sequence
+                    else:
+                        # Repeated chars in middle (e.g., "zggk", "b33n")
+                        if remaining == 1:
+                            username = other_chars[0] + repeat_sequence
+                        else:
+                            mid = remaining // 2
+                            username = ''.join(other_chars[:mid]) + repeat_sequence + ''.join(other_chars[mid:])
+                
+                if special_char and length > 0:
+                    repeat_sequence = repeat_char * num_repeats
+                    repeat_start = username.find(repeat_sequence)
+                    protected_idx = set()
+                    if repeat_start != -1:
+                        protected_idx = set(range(repeat_start, repeat_start + num_repeats))
+                    selectable = [i for i in range(len(username)) if i not in protected_idx]
+                    if not selectable:
+                        selectable = list(range(len(username)))
+                    replace_idx = rng.choice(selectable)
+                    username = username[:replace_idx] + special_char + username[replace_idx + 1:]
+
+                # If we are in letters+numbers mode, enforce at least one letter and one digit
+                if not letters_only and not _has_letter_and_digit(username):
+                    continue
+
+                usernames.append(username)
+        else:
+            # No repeating characters within username - each character must be unique
+            usernames = []
+            seen_usernames = set()  # Track unique usernames to avoid duplicates in the list
+            rng = secrets.SystemRandom()
+            while len(usernames) < count:
+                # Generate username with unique characters only
+                available_chars = list(characters)
+                rng.shuffle(available_chars)
+                username = ''.join(available_chars[:length])
+                
+                # Apply special character replacement if requested
+                if special_char and length > 0:
+                    replace_idx = rng.randrange(len(username))
+                    username = username[:replace_idx] + special_char + username[replace_idx + 1:]
+
+                # Enforce at least one letter and one digit in letters+numbers mode
+                if not letters_only and not _has_letter_and_digit(username):
+                    continue
+
+                # Make sure we haven't generated this exact username before
+                if username not in seen_usernames:
+                    usernames.append(username)
+                    seen_usernames.add(username)
+        
+        # Shuffle the list to ensure random order
+        secrets.SystemRandom().shuffle(usernames)
+        return usernames
+
+    def generate_repeater_usernames(length, count, letters_only=False, special_char=None):
+        """Generate repeater usernames with exactly 2 consecutive identical characters (e.g., ggkq, egnn, ahhp).
+        
+        Generates ALL possible combinations exhaustively for 3 and 4 character usernames.
+        
+        - If letters_only is True  -> only a-z (e.g., ggkq, egnn, ahhp)
+        - If letters_only is False -> a-z + 0-9 (e.g., ggkq, 33bn, 6nnz)
+        """
+        if letters_only:
+            characters = string.ascii_lowercase
+        else:
+            characters = string.ascii_lowercase + string.digits
+        
+        def _has_letter_and_digit(s: str) -> bool:
+            """Return True if s contains at least one letter and one digit."""
+            has_letter = any(c.isalpha() for c in s)
+            has_digit = any(c.isdigit() for c in s)
+            return has_letter and has_digit
+        
+        print(f"{Colors.CYAN}Generating ALL possible repeater username combinations (exactly 2 consecutive identical characters)...{Colors.ENDC}")
+        
+        usernames = []
+        num_repeats = 2
+        remaining = length - num_repeats
+        
+        # Generate all combinations with exactly 2 consecutive identical characters
+        for repeat_char in characters:
+            # Create the repeated sequence (exactly 2 back-to-back)
+            repeat_sequence = repeat_char * num_repeats
+            
+            # Get other characters (excluding repeat_char to avoid 3+ in a row)
+            other_characters = [c for c in characters if c != repeat_char]
+            
+            if remaining > 0:
+                # Generate all combinations of remaining characters
+                for other_combo in itertools.permutations(other_characters, remaining):
+                    other_chars = list(other_combo)
+                    
+                    # Place repeated sequence in each possible position
+                    for pos in range(remaining + 1):
+                        if pos == 0:
+                            # Repeated chars at start (e.g., "ggkq", "33bn")
+                            username = repeat_sequence + ''.join(other_chars)
+                        elif pos == remaining:
+                            # Repeated chars at end (e.g., "kqgg", "bn33")
+                            username = ''.join(other_chars) + repeat_sequence
+                        else:
+                            # Repeated chars in middle (e.g., "kggq", "b33n")
+                            username = ''.join(other_chars[:pos]) + repeat_sequence + ''.join(other_chars[pos:])
+                        
+                        # Apply special character replacement if requested
+                        if special_char and length > 0:
+                            # Find the repeat sequence position
+                            repeat_start = username.find(repeat_sequence)
+                            protected_idx = set()
+                            if repeat_start != -1:
+                                protected_idx = set(range(repeat_start, repeat_start + num_repeats))
+                            
+                            # Replace one character that's not in the repeat sequence
+                            selectable = [i for i in range(len(username)) if i not in protected_idx]
+                            if selectable:
+                                # Generate all variations with special char in each non-protected position
+                                for replace_idx in selectable:
+                                    special_username = username[:replace_idx] + special_char + username[replace_idx + 1:]
+                                    
+                                    # If we are in letters+numbers mode, enforce at least one letter and one digit
+                                    if not letters_only and not _has_letter_and_digit(special_username):
+                                        continue
+                                    
+                                    usernames.append(special_username)
+                        else:
+                            # If we are in letters+numbers mode, enforce at least one letter and one digit
+                            if not letters_only and not _has_letter_and_digit(username):
+                                continue
+                            
+                            usernames.append(username)
+            else:
+                # Only happens for 2-character usernames (e.g., "aa", "33")
+                username = repeat_sequence
+                
+                # Apply special character replacement if requested
+                if special_char and length > 0:
+                    # For 2-char usernames, replace one character with special char
+                    for pos in range(length):
+                        special_username = username[:pos] + special_char + username[pos + 1:]
+                        usernames.append(special_username)
+                else:
+                    usernames.append(username)
+        
+        # Remove duplicates (preserves order while removing duplicates)
+        usernames = list(dict.fromkeys(usernames))
+        
+        # Show some examples to verify the generation
+        if usernames:
+            examples = usernames[:10] if len(usernames) >= 10 else usernames
+            examples_str = ', '.join(examples)
+            print(f"{Colors.GREEN}Generated {len(usernames)} total repeater username combinations (100% exhaustive). Examples: {examples_str}...{Colors.ENDC}")
+        
+        # Limit to count if specified (if count is None or 0, return all)
+        original_count = len(usernames)
+        if count is not None and count > 0 and len(usernames) > count:
+            # Randomly sample the specified count from all combinations
+            rng = secrets.SystemRandom()
+            usernames = rng.sample(usernames, count)
+            print(f"{Colors.YELLOW}Sampled {count} usernames from {original_count} total repeater username combinations.{Colors.ENDC}")
+        
+        # Shuffle the list to ensure random order
+        secrets.SystemRandom().shuffle(usernames)
+        return usernames
+
+    def prompt_special_char(replace_label="character"):
+        """Ask the user if they want to replace one character with '.' or '_'."""
+        print(f"\n{Colors.BOLD}Replace one {replace_label} with '.' or '_'?{Colors.ENDC}")
+        print(f"{Colors.CYAN}1.{Colors.ENDC} No")
+        print(f"{Colors.CYAN}2.{Colors.ENDC} Replace with '.'")
+        print(f"{Colors.CYAN}3.{Colors.ENDC} Replace with '_'")
+        choice = input(f"\n{Colors.YELLOW}Enter your choice (1/2/3): {Colors.ENDC}").strip()
+        if choice == '2':
+            return '.'
+        if choice == '3':
+            return '_'
+        return None
+
+    def load_common_english_words():
+        """Return a curated list of common English words."""
+        common_words = [
+            'a', 'about', 'above', 'after', 'again', 'against', 'air', 'all', 'almost', 'alone', 'along', 'already',
+            'also', 'always', 'am', 'among', 'an', 'and', 'animal', 'another', 'answer', 'any', 'anyone', 'anything',
+            'appear', 'are', 'around', 'ask', 'at', 'away', 'baby', 'back', 'bad', 'ball', 'be', 'because', 'become',
+            'bed', 'been', 'before', 'began', 'begin', 'behind', 'believe', 'below', 'best', 'better', 'between', 'big',
+            'bird', 'black', 'blue', 'boat', 'body', 'book', 'both', 'bottom', 'box', 'boy', 'bring', 'brother', 'brought',
+            'build', 'busy', 'but', 'buy', 'by', 'call', 'came', 'can', 'cannot', 'car', 'care', 'carry', 'case', 'cat',
+            'certain', 'change', 'child', 'children', 'city', 'class', 'close', 'cold', 'come', 'common', 'company',
+            'complete', 'could', 'country', 'course', 'cut', 'dark', 'day', 'deal', 'deep', 'did', 'die', 'different',
+            'do', 'does', 'dog', 'done', 'door', 'down', 'draw', 'dream', 'dress', 'drive', 'dry', 'during', 'each',
+            'ear', 'early', 'earth', 'east', 'eat', 'effect', 'egg', 'eight', 'either', 'enough', 'even', 'ever',
+            'every', 'everyone', 'everything', 'example', 'eye', 'face', 'fact', 'family', 'far', 'farm', 'fast',
+            'father', 'feel', 'feet', 'few', 'field', 'figure', 'fill', 'find', 'fine', 'finger', 'finish', 'fire',
+            'first', 'fish', 'five', 'floor', 'follow', 'food', 'foot', 'for', 'form', 'found', 'four', 'friend', 'from',
+            'front', 'full', 'game', 'gave', 'general', 'get', 'girl', 'give', 'glass', 'go', 'gold', 'good', 'got',
+            'great', 'green', 'ground', 'group', 'grow', 'half', 'hand', 'happen', 'happy', 'hard', 'have', 'head',
+            'hear', 'heart', 'heavy', 'help', 'her', 'here', 'high', 'hill', 'him', 'himself', 'his', 'history', 'hit',
+            'hold', 'home', 'horse', 'hot', 'hour', 'house', 'how', 'however', 'hundred', 'I', 'idea', 'if', 'important',
+            'in', 'inch', 'include', 'inside', 'into', 'is', 'island', 'it', 'its', 'job', 'join', 'just', 'keep', 'kind',
+            'knew', 'know', 'known', 'lady', 'lake', 'land', 'language', 'large', 'last', 'late', 'laugh', 'lead',
+            'learn', 'least', 'leave', 'left', 'leg', 'less', 'let', 'letter', 'life', 'light', 'like', 'line', 'list',
+            'little', 'live', 'long', 'look', 'lot', 'love', 'low', 'machine', 'made', 'make', 'man', 'many', 'map',
+            'mark', 'matter', 'may', 'me', 'mean', 'measure', 'men', 'might', 'mile', 'milk', 'mind', 'minute', 'miss',
+            'money', 'month', 'moon', 'more', 'morning', 'most', 'mother', 'mountain', 'move', 'much', 'music', 'must',
+            'my', 'name', 'nation', 'near', 'need', 'never', 'new', 'next', 'night', 'no', 'none', 'north', 'note',
+            'nothing', 'notice', 'now', 'number', 'object', 'of', 'off', 'offer', 'office', 'often', 'oil', 'old', 'on',
+            'once', 'one', 'only', 'open', 'or', 'order', 'other', 'our', 'out', 'over', 'own', 'page', 'pain', 'paint',
+            'pair', 'paper', 'part', 'party', 'pass', 'past', 'people', 'person', 'picture', 'piece', 'place', 'plan',
+            'plane', 'plant', 'play', 'point', 'power', 'present', 'press', 'pretty', 'problem', 'produce', 'product',
+            'prove', 'pull', 'put', 'question', 'quick', 'quiet', 'quite', 'rain', 'raise', 'reach', 'read', 'ready',
+            'real', 'really', 'reason', 'red', 'remember', 'rest', 'result', 'ride', 'right', 'river', 'road', 'rock',
+            'roll', 'room', 'round', 'rule', 'run', 'said', 'same', 'saw', 'say', 'school', 'science', 'sea', 'second',
+            'see', 'seem', 'seen', 'sell', 'send', 'sense', 'sent', 'set', 'seven', 'several', 'shall', 'shape', 'she',
+            'ship', 'shoe', 'short', 'should', 'show', 'side', 'sign', 'simple', 'since', 'sing', 'sit', 'six', 'size',
+            'sky', 'sleep', 'small', 'snow', 'so', 'some', 'someone', 'something', 'song', 'soon', 'sound', 'south',
+            'space', 'special', 'stand', 'star', 'start', 'state', 'stay', 'step', 'stick', 'still', 'stone', 'stood',
+            'stop', 'store', 'story', 'street', 'strong', 'student', 'study', 'such', 'summer', 'sun', 'sure', 'table',
+            'take', 'talk', 'teach', 'tell', 'ten', 'test', 'than', 'thank', 'that', 'the', 'their', 'them', 'themselves',
+            'then', 'there', 'these', 'they', 'thing', 'think', 'third', 'this', 'those', 'though', 'thought', 'three',
+            'through', 'throw', 'time', 'told', 'took', 'top', 'toward', 'town', 'travel', 'tree', 'true', 'try', 'turn',
+            'two', 'under', 'understand', 'unit', 'until', 'up', 'upon', 'us', 'use', 'usual', 'very', 'wait', 'walk',
+            'want', 'warm', 'was', 'watch', 'water', 'way', 'we', 'wear', 'week', 'well', 'went', 'were', 'west', 'what',
+            'wheel', 'when', 'where', 'while', 'white', 'who', 'whole', 'why', 'will', 'wind', 'window', 'wish', 'with',
+            'within', 'without', 'woman', 'women', 'wonder', 'word', 'work', 'world', 'would', 'write', 'written', 'wrong',
+            'year', 'yes', 'yet', 'you', 'young', 'your', 'yourself'
+        ]
+        seen = set()
+        unique_words = []
+        for word in common_words:
+            if word not in seen:
+                seen.add(word)
+                unique_words.append(word)
+        return unique_words
+
+    def load_comp_words():
+        """Load curated comp words - good Discord username words"""
+        comp_words = [
+            # Goth/Dark aesthetic - expanded
+            'goth', 'gothic', 'dark', 'darkness', 'shadow', 'shade', 'void', 'abyss', 'night', 'midnight', 'dusk', 'dawn',
+            'raven', 'crow', 'vampire', 'vamp', 'demon', 'devil', 'satan', 'lucifer', 'beelzebub', 'hellspawn',
+            'sin', 'sinner', 'evil', 'wicked', 'chaos', 'doom', 'death', 'dead', 'dying', 'grave', 'tomb', 'crypt',
+            'skull', 'bone', 'skeleton', 'ash', 'ashes', 'ember', 'smoke', 'mist', 'fog', 'haze',
+            'black', 'obsidian', 'onyx', 'ebony', 'noir', 'phantom', 'ghost', 'spirit', 'soul', 'cursed', 'hexed',
+            'hex', 'witch', 'warlock', 'sorcerer', 'necromancer', 'undead', 'zombie', 'corpse', 'rotten', 'decay', 'rot',
+            'nightmare', 'horror', 'terror', 'fright', 'dread', 'panic', 'fear', 'scared', 'afraid', 'anxious', 'nervous',
+            'depressed', 'sad', 'lonely', 'empty', 'broken', 'hurt', 'pain', 'tears', 'cry', 'sorrow', 'grief', 'mourn',
+            'moody', 'angry', 'rage', 'fury', 'wrath', 'hate', 'bitter', 'cold', 'frozen', 'numb', 'dead', 'lifeless',
+            'bleed', 'blood', 'cut', 'scar', 'wound', 'bruise', 'ache', 'sting', 'burn', 'torment', 'agony',
+            
+            # Emo/Emotional - expanded
+            'emo', 'emotional', 'sad', 'sadness', 'lonely', 'loneliness', 'empty', 'emptiness', 'broken', 'hurt', 'hurting',
+            'pain', 'painful', 'tears', 'cry', 'crying', 'sorrow', 'grief', 'mourn', 'mourning', 'depressed', 'depression',
+            'anxious', 'anxiety', 'nervous', 'scared', 'afraid', 'fear', 'fearful', 'dread', 'panic', 'worry', 'worried',
+            'moody', 'angry', 'anger', 'rage', 'raging', 'fury', 'furious', 'hate', 'hatred', 'bitter', 'bitterness',
+            'cold', 'frozen', 'freeze', 'numb', 'dead', 'lifeless', 'bleed', 'bleeding', 'blood', 'cut', 'cutting',
+            'scar', 'scared', 'wound', 'wounded', 'bruise', 'bruised', 'hurt', 'hurting', 'ache', 'aching', 'sting', 'stinging',
+            'burn', 'burning', 'torment', 'agony', 'suffer', 'suffering', 'torture', 'tortured',
+            
+            # Trap/Rap culture - expanded
+            'trap', 'trapping', 'drip', 'dripping', 'swag', 'swagger', 'flex', 'flexing', 'lit', 'fire', 'fired', 'heat', 'heating',
+            'wave', 'waving', 'vibe', 'vibing', 'mood', 'moody', 'energy', 'energetic', 'hustle', 'hustling', 'grind', 'grinding',
+            'money', 'cash', 'rich', 'richer', 'wealth', 'wealthy', 'gold', 'golden', 'diamond', 'ice', 'icy', 'bling', 'blinging',
+            'king', 'queen', 'boss', 'bossing', 'chief', 'god', 'gods', 'legend', 'legendary', 'icon', 'iconic', 'star', 'starry',
+            'elite', 'prime', 'premium', 'beast', 'beasting', 'monster', 'savage', 'savaging', 'wild', 'wilder', 'crazy', 'crazier',
+            'insane', 'mad', 'madder', 'furious', 'fury', 'rage', 'raging',
+            
+            # Drug/Substance related (subtle) - expanded
+            'smoke', 'smoking', 'smoked', 'cloud', 'cloudy', 'mist', 'misty', 'fog', 'foggy', 'haze', 'hazy', 'vapor', 'vaporous',
+            'steam', 'steamy', 'ash', 'ashes', 'ember', 'embers', 'spark', 'sparks', 'high', 'higher', 'fly', 'flying', 'soar', 'soaring',
+            'float', 'floating', 'drift', 'drifting', 'flow', 'flowing', 'wave', 'waving', 'rush', 'rushing', 'surge', 'surging', 'boost', 'boosting',
+            'pulse', 'pulsing', 'beat', 'beating', 'rhythm', 'rhythmic', 'vibe', 'vibing', 'energy', 'energetic', 'power', 'powerful',
+            'force', 'forced', 'strength', 'strong', 'crystal', 'crystals', 'ice', 'icy', 'frost', 'frosty', 'snow', 'snowy', 'white', 'whiter',
+            'pure', 'purer', 'clean', 'cleaner', 'fresh', 'fresher',
+            
+            # Cool/Edgy general - massively expanded
+            'void', 'null', 'zero', 'blank', 'empty', 'hollow', 'chaos', 'order', 'balance', 'zen', 'peace', 'peaceful', 'calm', 'calmer',
+            'serene', 'tranquil', 'storm', 'stormy', 'thunder', 'thundering', 'lightning', 'bolt', 'bolting', 'strike', 'striking', 'shock', 'shocking',
+            'surge', 'surging', 'blast', 'blasting', 'rage', 'raging', 'fury', 'furious', 'wrath', 'wrathful', 'anger', 'angry', 'hate', 'hatred',
+            'venom', 'venomous', 'poison', 'poisonous', 'toxic', 'neon', 'neon', 'cyber', 'cyberpunk', 'tech', 'technical', 'digital', 'virtual',
+            'matrix', 'code', 'coding', 'data', 'steel', 'steely', 'iron', 'irony', 'metal', 'metallic', 'chrome', 'chromed', 'silver', 'silvery',
+            'platinum', 'titanium', 'flame', 'flaming', 'blaze', 'blazing', 'inferno', 'hell', 'hellish', 'lava', 'magma', 'burn', 'burning',
+            'scorch', 'scorching', 'frost', 'frosty', 'ice', 'icy', 'cold', 'colder', 'freeze', 'freezing', 'glacier', 'arctic', 'polar', 'winter',
+            'hurricane', 'typhoon', 'tornado', 'cyclone', 'tempest', 'gale', 'phantom', 'ghostly', 'spirit', 'spiritual', 'specter', 'wraith', 'shade',
+            'vortex', 'whirl', 'whirling', 'spin', 'spinning', 'twist', 'twisting', 'spiral', 'spiraling', 'coil', 'coiling', 'curl', 'curling',
+            'nexus', 'node', 'core', 'hub', 'center', 'focus', 'focused', 'point', 'pointed', 'quantum', 'atomic', 'nuclear', 'plasma',
+            'glow', 'glowing', 'shine', 'shining', 'bright', 'brighter', 'radiant', 'luminous', 'brilliant',
+            'crimson', 'scarlet', 'blood', 'bloody', 'red', 'redder', 'rose', 'rosy', 'ruby', 'garnet',
+            'azure', 'cyan', 'blue', 'bluer', 'ocean', 'sea', 'wave', 'wavy', 'tide', 'tidal',
+            'violet', 'purple', 'purpler', 'lavender', 'amethyst', 'plum', 'indigo',
+            'emerald', 'jade', 'green', 'greener', 'forest', 'jungle', 'moss', 'mossy', 'lime', 'limy',
+            'amber', 'gold', 'golden', 'yellow', 'yellower', 'sun', 'sunny', 'solar', 'bright', 'brighter', 'light', 'lighter',
+            'onyx', 'ebony', 'black', 'blacker', 'dark', 'darker', 'night', 'nightly',
+            'pearl', 'ivory', 'white', 'whiter', 'snow', 'snowy', 'crystal', 'crystals',
+            
+            # Short cool words - expanded
+            'vex', 'hex', 'zen', 'arc', 'ion', 'neo', 'rex', 'lex', 'max', 'axe', 'fox', 'lynx', 'onyx', 'pyx', 'wax', 'flux', 'crux', 'lux',
+            'nova', 'luna', 'sola', 'aura', 'ora', 'era', 'ara', 'echo', 'zero', 'hero', 'nero', 'retro', 'metro',
+            'vibe', 'tribe', 'scribe', 'bribe', 'globe', 'probe', 'blade', 'shade', 'fade', 'jade', 'made', 'wade',
+            'flame', 'frame', 'game', 'name', 'same', 'tame', 'storm', 'form', 'norm', 'warm', 'charm', 'arm',
+            'frost', 'lost', 'cost', 'host', 'most', 'post', 'ghost', 'coast', 'toast', 'avoid', 'moist', 'hoist', 'foist',
+            
+            # Gaming/Internet culture - expanded
+            'pog', 'poggers', 'based', 'cringe', 'cringy', 'sus', 'sussy', 'cap', 'no', 'fr', 'frfr', 'slay', 'slayed', 'slaying', 'queen', 'king',
+            'icon', 'iconic', 'legend', 'legendary', 'goat', 'goated', 'goating', 'best', 'better', 'top', 'elite', 'pro', 'professional',
+            'clutch', 'clutching', 'carry', 'carried', 'carrying', 'win', 'wins', 'winning', 'wins', 'owned', 'owning', 'owns',
+            'rekt', 'rekted', 'destroyed', 'dominated', 'dominating', 'dominates', 'crushed', 'crushing', 'crushes',
+            'annihilated', 'annihilating', 'annihilates', 'obliterated', 'obliterating', 'smoked', 'smoking', 'smokes',
+            'clapped', 'clapping', 'claps', 'bodied', 'bodying', 'bodies', 'violated', 'violating', 'violates',
+            
+            # Abstract/Cool sounding - expanded
+            'nexus', 'vortex', 'quantum', 'atomic', 'nuclear', 'plasma', 'neon', 'cyber', 'digital', 'virtual', 'matrix', 'code',
+            'void', 'null', 'zero', 'infinity', 'eternity', 'chaos', 'order', 'balance', 'harmony', 'discord', 'unity',
+            'storm', 'thunder', 'lightning', 'bolt', 'strike', 'shock', 'flame', 'blaze', 'inferno', 'hell', 'lava', 'magma',
+            'frost', 'ice', 'cold', 'freeze', 'glacier', 'arctic', 'phantom', 'ghost', 'spirit', 'specter', 'wraith', 'shade',
+            'crimson', 'scarlet', 'azure', 'cyan', 'violet', 'emerald', 'onyx', 'ebony', 'pearl', 'ivory', 'amber', 'jade',
+            
+            # Additional cool words
+            'blade', 'sword', 'knife', 'dagger', 'arrow', 'bow', 'gun', 'rifle', 'pistol', 'revolver', 'shotgun', 'sniper',
+            'warrior', 'fighter', 'soldier', 'knight', 'samurai', 'ninja', 'assassin', 'hunter', 'ranger', 'scout',
+            'dragon', 'wyvern', 'phoenix', 'griffin', 'unicorn', 'pegasus', 'cerberus', 'hydra', 'leviathan', 'kraken',
+            'wizard', 'mage', 'sorcerer', 'enchanter', 'alchemist', 'shaman', 'druid', 'priest', 'cleric', 'paladin',
+            'rogue', 'thief', 'bandit', 'pirate', 'outlaw', 'rebel', 'anarchist', 'revolutionary', 'freedom', 'liberty',
+            'crown', 'throne', 'scepter', 'orb', 'crystal', 'gem', 'jewel', 'treasure', 'hoard', 'loot', 'booty', 'plunder',
+            'castle', 'fortress', 'tower', 'dungeon', 'crypt', 'tomb', 'grave', 'mausoleum', 'catacomb', 'labyrinth',
+            'moon', 'lunar', 'sun', 'solar', 'star', 'stellar', 'galaxy', 'nebula', 'cosmos', 'universe', 'infinity', 'eternity',
+            'fire', 'flame', 'blaze', 'ember', 'spark', 'inferno', 'hellfire', 'magma', 'lava', 'volcano',
+            'ice', 'frost', 'snow', 'blizzard', 'hail', 'glacier', 'arctic', 'polar', 'frozen', 'freeze',
+            'wind', 'breeze', 'gale', 'storm', 'hurricane', 'tornado', 'cyclone', 'typhoon', 'tempest', 'whirlwind',
+            'water', 'ocean', 'sea', 'wave', 'tide', 'current', 'flow', 'stream', 'river', 'lake', 'pond', 'pool',
+            'earth', 'ground', 'soil', 'stone', 'rock', 'boulder', 'mountain', 'hill', 'valley', 'canyon', 'cliff',
+            'forest', 'woods', 'jungle', 'swamp', 'marsh', 'bog', 'meadow', 'field', 'plain', 'prairie',
+            'wolf', 'fox', 'bear', 'lion', 'tiger', 'panther', 'leopard', 'jaguar', 'lynx', 'bobcat',
+            'eagle', 'hawk', 'falcon', 'raven', 'crow', 'owl', 'vulture', 'phoenix', 'griffin',
+            'snake', 'viper', 'cobra', 'python', 'serpent', 'dragon', 'wyrm', 'basilisk',
+            'spider', 'scorpion', 'wasp', 'hornet', 'bee', 'ant', 'beetle', 'mantis',
+            'shadow', 'shade', 'darkness', 'void', 'abyss', 'black', 'onyx', 'ebony', 'noir',
+            'light', 'bright', 'radiant', 'luminous', 'brilliant', 'glow', 'shine', 'gleam', 'sparkle', 'twinkle',
+            'blood', 'crimson', 'scarlet', 'red', 'rose', 'ruby', 'garnet', 'burgundy', 'maroon',
+            'ocean', 'azure', 'cyan', 'blue', 'sapphire', 'turquoise', 'teal', 'navy', 'indigo',
+            'violet', 'purple', 'lavender', 'amethyst', 'plum', 'mauve', 'lilac', 'orchid',
+            'emerald', 'jade', 'green', 'lime', 'mint', 'forest', 'olive', 'sage', 'moss',
+            'amber', 'gold', 'yellow', 'sun', 'saffron', 'honey', 'mustard', 'canary',
+            'silver', 'platinum', 'gray', 'grey', 'ash', 'slate', 'steel', 'iron', 'chrome',
+            'crystal', 'diamond', 'pearl', 'ivory', 'white', 'snow', 'frost', 'ice', 'moon',
+            
+            # Action/Verb words
+            'strike', 'striking', 'hit', 'hitting', 'smash', 'smashing', 'crush', 'crushing', 'break', 'breaking',
+            'slash', 'slashing', 'cut', 'cutting', 'slice', 'slicing', 'stab', 'stabbing', 'pierce', 'piercing',
+            'shoot', 'shooting', 'fire', 'firing', 'blast', 'blasting', 'explode', 'exploding', 'detonate', 'detonating',
+            'burn', 'burning', 'scorch', 'scorching', 'melt', 'melting', 'freeze', 'freezing', 'frost', 'frosting',
+            'fly', 'flying', 'soar', 'soaring', 'dive', 'diving', 'dash', 'dashing', 'rush', 'rushing', 'charge', 'charging',
+            'run', 'running', 'sprint', 'sprinting', 'race', 'racing', 'speed', 'speeding', 'zoom', 'zooming',
+            'jump', 'jumping', 'leap', 'leaping', 'bound', 'bounding', 'hop', 'hopping', 'skip', 'skipping',
+            'fight', 'fighting', 'battle', 'battling', 'war', 'warring', 'combat', 'combating', 'duel', 'dueling',
+            'hunt', 'hunting', 'track', 'tracking', 'stalk', 'stalking', 'chase', 'chasing', 'pursue', 'pursuing',
+            'steal', 'stealing', 'rob', 'robbing', 'loot', 'looting', 'plunder', 'plundering', 'raid', 'raiding',
+            'cast', 'casting', 'summon', 'summoning', 'invoke', 'invoking', 'conjure', 'conjuring', 'enchant', 'enchanting',
+            'transform', 'transforming', 'shift', 'shifting', 'change', 'changing', 'morph', 'morphing', 'evolve', 'evolving',
+            
+            # Power/Strength words
+            'power', 'powerful', 'force', 'forced', 'strength', 'strong', 'might', 'mighty', 'energy', 'energetic',
+            'rage', 'raging', 'fury', 'furious', 'wrath', 'wrathful', 'anger', 'angry', 'hate', 'hatred',
+            'chaos', 'chaotic', 'order', 'ordered', 'balance', 'balanced', 'harmony', 'harmonious', 'discord', 'discordant',
+            'void', 'null', 'zero', 'infinity', 'infinite', 'eternity', 'eternal', 'endless', 'boundless', 'limitless',
+            'divine', 'godly', 'holy', 'sacred', 'blessed', 'cursed', 'hexed', 'damned', 'doomed', 'fated',
+            'legend', 'legendary', 'myth', 'mythical', 'epic', 'heroic', 'immortal', 'eternal', 'timeless', 'ageless',
+            'ancient', 'old', 'elder', 'primeval', 'primordial', 'original', 'first', 'last', 'final', 'ultimate',
+            
+            # Mystical/Magic words
+            'magic', 'magical', 'spell', 'spelling', 'curse', 'cursing', 'hex', 'hexing', 'charm', 'charming',
+            'enchant', 'enchanting', 'bewitch', 'bewitching', 'entrance', 'entrancing', 'mesmerize', 'mesmerizing',
+            'summon', 'summoning', 'invoke', 'invoking', 'conjure', 'conjuring', 'evoke', 'evoking', 'call', 'calling',
+            'ritual', 'ceremony', 'rite', 'spell', 'incantation', 'charm', 'hex', 'curse', 'blessing', 'prayer',
+            'crystal', 'crystals', 'gem', 'gems', 'jewel', 'jewels', 'orb', 'orbs', 'stone', 'stones',
+            'rune', 'runes', 'sigil', 'sigils', 'symbol', 'symbols', 'mark', 'marks', 'sign', 'signs',
+            'portal', 'portals', 'gate', 'gates', 'door', 'doors', 'threshold', 'veil', 'barrier', 'wall',
+            'realm', 'realms', 'dimension', 'dimensions', 'plane', 'planes', 'world', 'worlds', 'universe', 'universes',
+            
+            # Tech/Digital words
+            'cyber', 'cyberpunk', 'tech', 'technical', 'digital', 'virtual', 'matrix', 'code', 'coding', 'data',
+            'neon', 'glitch', 'glitching', 'hack', 'hacking', 'crack', 'cracking', 'exploit', 'exploiting',
+            'byte', 'bytes', 'bit', 'bits', 'pixel', 'pixels', 'render', 'rendering', 'process', 'processing',
+            'network', 'networking', 'server', 'servers', 'node', 'nodes', 'hub', 'hubs', 'core', 'cores',
+            'system', 'systems', 'program', 'programs', 'script', 'scripts', 'algorithm', 'algorithms',
+            'quantum', 'atomic', 'nuclear', 'plasma', 'energy', 'power', 'force', 'strength',
+            'neural', 'neural', 'synapse', 'synapses', 'circuit', 'circuits', 'wire', 'wires', 'cable', 'cables',
+            'robot', 'robots', 'android', 'androids', 'cyborg', 'cyborgs', 'drone', 'drones', 'bot', 'bots',
+            'ai', 'artificial', 'intelligence', 'machine', 'machines', 'automaton', 'automatons',
+            
+            # Nature/Elements
+            'storm', 'stormy', 'thunder', 'thundering', 'lightning', 'bolt', 'bolting', 'strike', 'striking',
+            'rain', 'raining', 'rainy', 'drizzle', 'drizzling', 'shower', 'showering', 'downpour', 'deluge', 'flood',
+            'wind', 'windy', 'breeze', 'breezy', 'gale', 'storm', 'hurricane', 'tornado', 'cyclone', 'typhoon',
+            'snow', 'snowy', 'snowing', 'blizzard', 'hail', 'hailing', 'frost', 'frosty', 'ice', 'icy',
+            'fire', 'flame', 'flaming', 'blaze', 'blazing', 'ember', 'embers', 'spark', 'sparks', 'inferno',
+            'earth', 'ground', 'soil', 'dirt', 'mud', 'clay', 'stone', 'rock', 'boulder', 'pebble',
+            'mountain', 'mountains', 'hill', 'hills', 'valley', 'valleys', 'canyon', 'canyons', 'cliff', 'cliffs',
+            'forest', 'forests', 'woods', 'jungle', 'jungles', 'swamp', 'swamps', 'marsh', 'marshes',
+            'ocean', 'oceans', 'sea', 'seas', 'wave', 'waves', 'tide', 'tides', 'current', 'currents',
+            'river', 'rivers', 'stream', 'streams', 'brook', 'brooks', 'creek', 'creeks', 'lake', 'lakes',
+            
+            # Animal names
+            'wolf', 'wolves', 'fox', 'foxes', 'bear', 'bears', 'lion', 'lions', 'tiger', 'tigers',
+            'panther', 'panthers', 'leopard', 'leopards', 'jaguar', 'jaguars', 'lynx', 'lynxes', 'bobcat', 'bobcats',
+            'eagle', 'eagles', 'hawk', 'hawks', 'falcon', 'falcons', 'raven', 'ravens', 'crow', 'crows',
+            'owl', 'owls', 'vulture', 'vultures', 'phoenix', 'griffin', 'griffins', 'dragon', 'dragons',
+            'snake', 'snakes', 'viper', 'vipers', 'cobra', 'cobras', 'python', 'pythons', 'serpent', 'serpents',
+            'spider', 'spiders', 'scorpion', 'scorpions', 'wasp', 'wasps', 'hornet', 'hornets',
+            'shark', 'sharks', 'orca', 'orcas', 'whale', 'whales', 'dolphin', 'dolphins',
+            'horse', 'horses', 'stallion', 'stallions', 'mare', 'mares', 'pony', 'ponies',
+            'deer', 'deer', 'stag', 'stags', 'doe', 'does', 'buck', 'bucks',
+            
+            # Weapon/Tool words
+            'blade', 'blades', 'sword', 'swords', 'knife', 'knives', 'dagger', 'daggers', 'saber', 'sabers',
+            'axe', 'axes', 'hatchet', 'hatchets', 'mace', 'maces', 'hammer', 'hammers', 'club', 'clubs',
+            'bow', 'bows', 'arrow', 'arrows', 'quiver', 'quivers', 'crossbow', 'crossbows',
+            'gun', 'guns', 'rifle', 'rifles', 'pistol', 'pistols', 'revolver', 'revolvers',
+            'shotgun', 'shotguns', 'sniper', 'snipers', 'cannon', 'cannons', 'mortar', 'mortars',
+            'shield', 'shields', 'armor', 'armors', 'helmet', 'helmets', 'gauntlet', 'gauntlets',
+            
+            # Time/Abstract concepts
+            'time', 'times', 'hour', 'hours', 'minute', 'minutes', 'second', 'seconds', 'moment', 'moments',
+            'day', 'days', 'night', 'nights', 'dawn', 'dusk', 'twilight', 'midnight', 'noon',
+            'week', 'weeks', 'month', 'months', 'year', 'years', 'decade', 'decades', 'century', 'centuries',
+            'past', 'present', 'future', 'eternity', 'eternal', 'infinity', 'infinite', 'endless', 'timeless',
+            'memory', 'memories', 'dream', 'dreams', 'nightmare', 'nightmares', 'vision', 'visions', 'illusion', 'illusions',
+            'hope', 'hopes', 'despair', 'despairs', 'joy', 'joys', 'sorrow', 'sorrows', 'love', 'loves', 'hate', 'hates',
+            'truth', 'truths', 'lie', 'lies', 'secret', 'secrets', 'mystery', 'mysteries', 'riddle', 'riddles',
+            
+            # More cool short words (only actually cool/comp-worthy ones)
+            'arc', 'ash', 'axe', 'bad', 'bar', 'bat', 'bay', 'bet', 'bit', 'bog', 'bot', 'bow', 'box', 'bra', 'bro', 'bud', 'bug', 'bum', 'bun',
+            'can', 'cap', 'car', 'cat', 'cob', 'cod', 'cog', 'con', 'cop', 'cos', 'coy', 'cru', 'cry', 'cub', 'cur', 'cut',
+            'dab', 'dag', 'dam', 'dap', 'daw', 'day', 'deb', 'def', 'den', 'dew', 'dib', 'did', 'die', 'dig', 'dim', 'din', 'dip', 'dis', 'doc', 'dot', 'dry', 'dub', 'dud', 'due', 'dug', 'dun', 'duo',
+            'ear', 'eat', 'ebb', 'eco', 'eel', 'egg', 'ego', 'elf', 'elk', 'elm', 'end', 'eon', 'era', 'erg', 'err', 'ess', 'eve', 'eye',
+            'fab', 'fad', 'fan', 'far', 'fat', 'fax', 'fay', 'fed', 'fee', 'fen', 'fer', 'few', 'fey', 'fib', 'fig', 'fil', 'fin', 'fir', 'fit', 'fix', 'flu', 'fly', 'fob', 'foe', 'fog', 'fon', 'fop', 'for', 'fox', 'fro', 'fry', 'fun', 'fur',
+            'gab', 'gag', 'gal', 'gam', 'gap', 'gar', 'gas', 'gat', 'gay', 'ged', 'gee', 'gel', 'gem', 'get', 'gib', 'gid', 'gig', 'gin', 'git', 'gnu', 'gob', 'god', 'goo', 'got', 'gul', 'gum', 'gun', 'gut', 'guy', 'gym',
+            'had', 'hag', 'ham', 'hap', 'has', 'hat', 'haw', 'hay', 'hem', 'hen', 'hep', 'her', 'het', 'hew', 'hex', 'hey', 'hic', 'hid', 'hie', 'him', 'hip', 'his', 'hit', 'hob', 'hod', 'hoe', 'hog', 'hon', 'hop', 'hot', 'how', 'hub', 'hue', 'hug', 'hum', 'hun', 'hut',
+            'ice', 'icy', 'iff', 'ifs', 'ilk', 'ill', 'imp', 'ink', 'inn', 'ion', 'ire', 'irk', 'its', 'ivy',
+            'jab', 'jag', 'jam', 'jar', 'jaw', 'jay', 'jet', 'jib', 'jig', 'jot', 'joy', 'jug',
+            'kab', 'kay', 'keg', 'ken', 'key', 'kid', 'kin', 'kip', 'kit', 'koa', 'koi',
+            'lab', 'lad', 'lag', 'lam', 'lap', 'lar', 'las', 'lat', 'law', 'lax', 'lay', 'lea', 'led', 'lee', 'leg', 'lei', 'les', 'let', 'lev', 'lew', 'lex', 'lib', 'lid', 'lie', 'lin', 'lip', 'lis', 'lit', 'lob', 'log', 'lop', 'lot', 'low', 'lug', 'lum', 'lun', 'lur', 'lux', 'lye',
+            'mac', 'mad', 'mag', 'man', 'map', 'mar', 'mas', 'mat', 'maw', 'max', 'may', 'med', 'meg', 'mel', 'men', 'met', 'mew', 'mic', 'mid', 'mig', 'mil', 'mim', 'mir', 'mis', 'mix', 'moa', 'mob', 'mod', 'mog', 'mol', 'mom', 'mon', 'moo', 'mop', 'mor', 'mos', 'mot', 'mow', 'mud', 'mug', 'mum', 'mun', 'mus', 'mut',
+            'nab', 'nag', 'nap', 'nay', 'neb', 'nee', 'net', 'new', 'nib', 'nil', 'nim', 'nip', 'nix', 'nob', 'nod', 'nog', 'nom', 'noo', 'nor', 'nos', 'not', 'now', 'nub', 'nun', 'nut',
+            'oaf', 'oak', 'oar', 'oat', 'odd', 'ode', 'off', 'oft', 'ohm', 'oho', 'oil', 'old', 'one', 'ooh', 'opt', 'orb', 'orc', 'ore', 'our', 'out', 'ova', 'owe', 'owl', 'own',
+            'pac', 'pad', 'pal', 'pan', 'pap', 'par', 'pas', 'pat', 'paw', 'pax', 'pay', 'pea', 'pec', 'ped', 'pee', 'peg', 'pen', 'pep', 'per', 'pes', 'pet', 'pew', 'pic', 'pie', 'pig', 'pin', 'pip', 'pit', 'pix', 'ply', 'pod', 'poi', 'pol', 'pom', 'pon', 'poo', 'pop', 'pot', 'pow', 'pox', 'pro', 'pry', 'pub', 'pud', 'pug', 'pun', 'pup', 'pur', 'pus', 'put', 'pyx',
+            'qat', 'qua', 'rad', 'rag', 'rah', 'ram', 'ran', 'rap', 'ras', 'rat', 'raw', 'ray', 'reb', 'rec', 'red', 'ree', 'ref', 'reg', 'rei', 'rem', 'rep', 'res', 'ret', 'rev', 'rex', 'rib', 'rid', 'rif', 'rig', 'rim', 'rin', 'rip', 'rit', 'rob', 'roc', 'rod', 'roe', 'rom', 'rot', 'row', 'rub', 'rue', 'rug', 'rum', 'run', 'rut', 'rye',
+            'sac', 'sad', 'sag', 'sal', 'sam', 'san', 'sap', 'sat', 'saw', 'sax', 'say', 'sea', 'sec', 'see', 'seg', 'sel', 'sen', 'ser', 'set', 'sew', 'sex', 'sha', 'she', 'shy', 'sib', 'sic', 'sim', 'sin', 'sip', 'sir', 'sis', 'sit', 'six', 'ska', 'ski', 'sky', 'sly', 'sob', 'sod', 'sol', 'som', 'son', 'sop', 'sos', 'sot', 'sou', 'sow', 'sox', 'soy', 'spa', 'spy', 'sty', 'sub', 'sue', 'sum', 'sun', 'sup', 'sur', 'sus',
+            'tab', 'tad', 'tag', 'taj', 'tam', 'tan', 'tao', 'tap', 'tar', 'tas', 'tat', 'tau', 'tav', 'taw', 'tax', 'tea', 'ted', 'tee', 'teg', 'tel', 'ten', 'tet', 'tew', 'the', 'tho', 'thy', 'tic', 'tie', 'til', 'tin', 'tip', 'tis', 'tit', 'tod', 'toe', 'tog', 'top', 'tor', 'tot', 'tow', 'toy', 'try', 'tub', 'tug', 'tui', 'tun', 'tup', 'tut', 'tux', 'twa', 'two', 'tye',
+            'udo', 'ugh', 'uke', 'umm', 'ump', 'uni', 'uns', 'ups', 'urb', 'urd', 'urn', 'use', 'uta', 'ute', 'uts', 'vac', 'van', 'var', 'vas', 'vat', 'vau', 'vaw', 'vee', 'veg', 'vet', 'vex', 'via', 'vid', 'vie', 'vig', 'vim', 'vin', 'vis', 'voe', 'vog', 'vow', 'vox', 'vug', 'vum',
+            'wab', 'wad', 'wag', 'wan', 'wap', 'war', 'was', 'wat', 'waw', 'wax', 'way', 'web', 'wed', 'wee', 'wen', 'wet', 'wha', 'who', 'why', 'wig', 'win', 'wis', 'wit', 'wiz', 'woe', 'wog', 'wok', 'won', 'woo', 'wop', 'wos', 'wot', 'wow', 'wry', 'wud', 'wye', 'wyn',
+            'xed', 'xis', 'yah', 'yak', 'yam', 'yap', 'yar', 'yaw', 'yay', 'yea', 'yeh', 'yen', 'yep', 'yes', 'yet', 'yew', 'yin', 'yip', 'yob', 'yod', 'yok', 'yom', 'yon', 'you', 'yow', 'yuk', 'yum', 'yup', 'yus',
+            'zag', 'zap', 'zas', 'zax', 'zed', 'zee', 'zek', 'zel', 'zen', 'zep', 'zes', 'zex', 'zig', 'zin', 'zip', 'zit', 'zoa', 'zoo', 'zuz', 'zzz',
+        ]
+        
+        # Remove duplicates while preserving order
+        seen = set()
+        unique_words = []
+        for word in comp_words:
+            if word not in seen:
+                seen.add(word)
+                unique_words.append(word)
+        
+        return unique_words
+    
+    def load_dictionary_words(length=None, count=None, comp_words_only=False, min_length=1, max_length=None):
+        """Load all English dictionary words from NLTK or comp words."""
+        if comp_words_only:
+            print(f"{Colors.CYAN}Loading common English words (popular everyday words)...{Colors.ENDC}")
+            english_words = []
+
+            # Try to use the wordfreq library for a large list of common words
+            try:
+                from wordfreq import top_n_list
+
+                # Grab the top 10,000 English words and filter to alphabetic only
+                freq_words = top_n_list('en', 10000)
+                english_words = [word for word in freq_words if word.isalpha()]
+                print(f"{Colors.GREEN}Loaded {len(english_words)} common English words from wordfreq.{Colors.ENDC}")
+            except ImportError:
+                print(f"{Colors.YELLOW}wordfreq not installed. Using built-in curated list (install with `pip install wordfreq` for more).{Colors.ENDC}")
+                english_words = load_common_english_words()
+                print(f"{Colors.GREEN}Loaded {len(english_words)} common English words from curated list.{Colors.ENDC}")
+            except Exception as e:
+                print(f"{Colors.YELLOW}Error loading wordfreq words ({e}). Using curated list instead.{Colors.ENDC}")
+                english_words = load_common_english_words()
+                print(f"{Colors.GREEN}Loaded {len(english_words)} common English words from curated list.{Colors.ENDC}")
+        else:
+            print(f"{Colors.CYAN}Loading all English words from dictionary...{Colors.ENDC}")
+            english_words = []
+            
+            # Try to use NLTK words corpus (comprehensive English dictionary)
+            try:
+                import nltk
+                try:
+                    nltk.data.find('corpora/words')
+                except LookupError:
+                    print(f"{Colors.YELLOW}Downloading NLTK words corpus (this may take a moment)...{Colors.ENDC}")
+                    nltk.download('words', quiet=True)
+                
+                from nltk.corpus import words
+                all_words = words.words()
+                # Filter to only alphabetic words, convert to lowercase, remove duplicates
+                english_words = list(set([word.lower() for word in all_words 
+                                        if word.isalpha() and len(word) >= 2]))
+                # Shuffle words immediately after loading to randomize order
+                if english_words:
+                    secrets.SystemRandom().shuffle(english_words)
+                print(f"{Colors.GREEN}Loaded {len(english_words)} English words from NLTK dictionary.{Colors.ENDC}")
+            except ImportError:
+                print(f"{Colors.RED}Error: NLTK is required for English dictionary. Please install it with: pip install nltk{Colors.ENDC}")
+                return []
+            except Exception as e:
+                print(f"{Colors.RED}Error loading NLTK words: {e}{Colors.ENDC}")
+                return []
+        
+        # Determine effective max length (explicit length argument overrides max_length)
+        if length is not None:
+            max_length = length
+
+        # Apply length filters
+        before_count = len(english_words)
+        english_words = [
+            word for word in english_words
+            if (len(word) >= min_length) and (max_length is None or len(word) <= max_length)
+        ]
+
+        if max_length is not None:
+            print(f"{Colors.CYAN}Filtered to {len(english_words)} words with length between {min_length} and {max_length}.{Colors.ENDC}")
+        else:
+            print(f"{Colors.CYAN}Filtered to {len(english_words)} words with minimum length {min_length}.{Colors.ENDC}")
+        
+        # Shuffle again after filtering to maintain randomness
+        if english_words:
+            secrets.SystemRandom().shuffle(english_words)
+        
+        # Limit count if specified (after shuffling to get random sample)
+        if count and english_words:
+            english_words = english_words[:count]
+            print(f"{Colors.CYAN}Limited to {len(english_words)} words.{Colors.ENDC}")
+        
+        return english_words
+
+    def file_writer():
+        """Dedicated thread for writing usernames to files - avoids file lock issues"""
+        global file_write_queue, DONE, platform
+        # Use platform-specific file names
+        if platform == "roblox":
+            session_file = 'available_roblox_usernames.txt'
+            total_file = 'available_roblox_usernames_total.txt'
+        else:
+            session_file = 'available_usernames.txt'
+            total_file = 'available_usernames_total.txt'
+        
+        while True:
+            try:
+                # Get username from queue (with timeout to check if we're done)
+                try:
+                    username = file_write_queue.get(timeout=0.1)
+                except:
+                    # Timeout - check if we're done
+                    if DONE and file_write_queue.empty():
+                        break
+                    continue
+                
+                # Write to session file with retry
+                for write_attempt in range(5):
+                    try:
+                        # Try to append - if file is locked, write to temp file first
+                        try:
+                            with open(session_file, 'a', encoding='utf-8', buffering=8192) as file:
+                                file.write(f"{username}\n")
+                                # Removed flush() for speed - OS will buffer and write efficiently
+                            break  # Success
+                        except (PermissionError, IOError, OSError):
+                            # File is locked, write to temp file and merge later
+                            temp_file = f"{session_file}.tmp"
+                            with open(temp_file, 'a', encoding='utf-8', buffering=8192) as file:
+                                file.write(f"{username}\n")
+                                # Removed flush() for speed
+                            # Try to merge temp file into main file
+                            try:
+                                with open(temp_file, 'r', encoding='utf-8') as tf:
+                                    content = tf.read()
+                                with open(session_file, 'a', encoding='utf-8', buffering=8192) as file:
+                                    file.write(content)
+                                    # Removed flush() for speed
+                                # Delete temp file after successful merge
+                                try:
+                                    os.remove(temp_file)
+                                except:
+                                    pass
+                            except:
+                                pass  # Temp file will be merged on next successful write
+                            break
+                    except Exception as e:
+                        if write_attempt < 4:
+                            time.sleep(0.01 * (write_attempt + 1))  # Reduced delay
+                        else:
+                            print(f"{Colors.RED}Error saving {username} to {session_file}: {e}{Colors.ENDC}")
+                
+                # Write to total file with retry
+                for write_attempt in range(5):
+                    try:
+                        with open(total_file, 'a', encoding='utf-8', buffering=8192) as file:
+                            file.write(f"{username}\n")
+                            # Removed flush() for speed - OS will buffer and write efficiently
+                        break
+                    except (PermissionError, IOError, OSError) as e:
+                        if write_attempt < 4:
+                            time.sleep(0.01 * (write_attempt + 1))  # Reduced delay
+                        else:
+                            # Write to temp file if main file is locked
+                            temp_file = f"{total_file}.tmp"
+                            try:
+                                with open(temp_file, 'a', encoding='utf-8', buffering=8192) as file:
+                                    file.write(f"{username}\n")
+                                    # Removed flush() for speed
+                            except:
+                                pass
+                    except Exception as e:
+                        if write_attempt < 4:
+                            time.sleep(0.01 * (write_attempt + 1))  # Reduced delay
+                        else:
+                            print(f"{Colors.RED}Error saving {username} to {total_file}: {e}{Colors.ENDC}")
+                
+                file_write_queue.task_done()
+            except Exception as e:
+                print(f"{Colors.RED}File writer error: {e}{Colors.ENDC}")
+
+    def worker():
+        """Worker thread to check usernames"""
+        global checked_count, available_count, usernames_to_check, DONE, consecutive_errors
+        
+        while True:
+            username = None
+            with lock:
+                if usernames_to_check:
+                    username = usernames_to_check.pop(0)
+                else:
+                    # No more usernames, exit
+                    break
+            
+            if username:
+                try:
+                    result = check_username_availability(username)
+                    with lock:
+                        checked_count += 1
+                        current_checked = checked_count
+                    
+                    if result is True:
+                        with lock:
+                            available_count += 1
+                            current_available = available_count
+                        # Print without blocking
+                        try:
+                            print(f"{Colors.GREEN}[AVAILABLE] {username} - Checked: {current_checked} | Available: {current_available}{Colors.ENDC}", flush=False)
+                        except:
+                            pass
+                        # Add to queue for thread-safe file writing (non-blocking)
+                        try:
+                            file_write_queue.put_nowait(username)
+                        except:
+                            try:
+                                file_write_queue.put(username, timeout=0.001)
+                            except:
+                                pass
+                    elif result == "inappropriate":
+                        try:
+                            print(f"{Colors.MAGENTA}[INAPPROPRIATE] {username} - Checked: {current_checked} | Available: {available_count}{Colors.ENDC}", flush=False)
+                        except:
+                            pass
+                    elif result is False:
+                        try:
+                            print(f"{Colors.RED}[TAKEN]     {username} - Checked: {current_checked} | Available: {available_count}{Colors.ENDC}", flush=False)
+                        except:
+                            pass
+                    else:
+                        try:
+                            print(f"{Colors.YELLOW}[ERROR]     {username} - Checked: {current_checked} | Available: {available_count}{Colors.ENDC}", flush=False)
+                        except:
+                            pass
+                except Exception as e:
+                    with lock:
+                        checked_count += 1
+                    try:
+                        print(f"{Colors.YELLOW}[ERROR]     {username} - Exception: {str(e)[:50]} - Checked: {checked_count} | Available: {available_count}{Colors.ENDC}", flush=False)
+                    except:
+                        pass
+                finally:
+                    # No delays - maximum speed
+                    if 'result' in locals() and result is None:
+                        consecutive_errors += 1
+                    else:
+                        consecutive_errors = 0
+    
+    async def async_worker(session, semaphore, username_queue, file_write_queue):
+        """Async worker coroutine to check usernames - simplified like threading version"""
+        global checked_count, available_count, consecutive_errors, rate_limit_detected
+        
+        while True:
+            try:
+                username = await asyncio.wait_for(username_queue.get(), timeout=0.05)
+            except asyncio.TimeoutError:
+                if username_queue.empty():
+                    break
+                continue
+            
+            if username is None:
+                break
+            
+            async with semaphore:
+                result = None
+                try:
+                    result = await async_check_username_availability(username, session)
+                    
+                    with lock:
+                        checked_count += 1
+                        current_checked = checked_count
+                    
+                    if result is True:
+                        with lock:
+                            available_count += 1
+                            current_available = available_count
+                        # Print without blocking
+                        try:
+                            print(f"{Colors.GREEN}[AVAILABLE] {username} - Checked: {current_checked} | Available: {current_available}{Colors.ENDC}", flush=False)
+                        except:
+                            pass
+                        # Queue without blocking
+                        try:
+                            file_write_queue.put_nowait(username)
+                        except:
+                            try:
+                                file_write_queue.put(username, timeout=0.001)
+                            except:
+                                pass
+                    elif result == "inappropriate":
+                        try:
+                            print(f"{Colors.MAGENTA}[INAPPROPRIATE] {username} - Checked: {current_checked} | Available: {available_count}{Colors.ENDC}", flush=False)
+                        except:
+                            pass
+                    elif result is False:
+                        try:
+                            print(f"{Colors.RED}[TAKEN]     {username} - Checked: {current_checked} | Available: {available_count}{Colors.ENDC}", flush=False)
+                        except:
+                            pass
+                    else:
+                        # Should never happen since async functions return True/False/"inappropriate"
+                        try:
+                            print(f"{Colors.YELLOW}[ERROR]     {username} - Unexpected result: {result} - Checked: {current_checked} | Available: {available_count}{Colors.ENDC}", flush=False)
+                        except:
+                            pass
+                        result = False  # Treat as taken
+                except Exception as e:
+                    with lock:
+                        checked_count += 1
+                        current_checked = checked_count
+                    try:
+                        print(f"{Colors.YELLOW}[ERROR]     {username} - Exception: {str(e)[:50]} - Checked: {current_checked} | Available: {available_count}{Colors.ENDC}", flush=False)
+                    except:
+                        pass
+                    result = None  # Mark as error for delay calculation
+                finally:
+                    # No delays - maximum speed
+                    if result is None:
+                        with lock:
+                            consecutive_errors += 1
+                    else:
+                        with lock:
+                            consecutive_errors = 0
+            
+            username_queue.task_done()
+    
+    async def async_main_runner(usernames_to_check, num_concurrent):
+        """Run async username checking - simplified like threading version"""
+        global checked_count, available_count, file_write_queue, platform, aio_session
+        
+        # Cap concurrency at maximum limits for speed
+        num_concurrent = min(num_concurrent, 1000)
+        
+        # Create async session with maximum speed optimizations
+        connector = aiohttp.TCPConnector(limit=num_concurrent * 5, limit_per_host=num_concurrent * 3, ttl_dns_cache=600, force_close=False, enable_cleanup_closed=True)
+        timeout = aiohttp.ClientTimeout(total=2, connect=0.5, sock_read=1.5)
+        aio_session = aiohttp.ClientSession(connector=connector, timeout=timeout, skip_auto_headers=['User-Agent'])
+        
+        # Create queues
+        username_queue = asyncio.Queue()
+        for username in usernames_to_check:
+            username_queue.put_nowait(username)
+        
+        # Create semaphore to limit concurrency
+        semaphore = asyncio.Semaphore(num_concurrent)
+        
+        # Start async workers - same number as concurrency limit
+        workers = []
+        for _ in range(num_concurrent):
+            worker = asyncio.create_task(async_worker(aio_session, semaphore, username_queue, file_write_queue))
+            workers.append(worker)
+        
+        # Wait for all workers to complete
+        await asyncio.gather(*workers, return_exceptions=True)
+        
+        # Wait for queue to be fully processed
+        await username_queue.join()
+        
+        # Close session
+        await aio_session.close()
+
+    def main():
+        global usernames_to_check, DONE, checked_count, available_count, file_writer_thread, file_write_queue, platform
+        
+        print(f"{Colors.BOLD}{Colors.CYAN}")
+        print("=" * 60)
+        print("     Username Checker")
+        print("=" * 60)
+        print(f"{Colors.ENDC}")
+        
+        # Load proxies
+        load_proxies()
+        
+        # Platform selection
+        global platform
+        print(f"\n{Colors.BOLD}Select platform:{Colors.ENDC}")
+        print(f"{Colors.CYAN}1.{Colors.ENDC} Discord")
+        print(f"{Colors.CYAN}2.{Colors.ENDC} Roblox")
+        
+        platform_choice = input(f"\n{Colors.YELLOW}Enter your choice (1/2): {Colors.ENDC}").strip()
+        
+        if platform_choice == '1':
+            platform = "discord"
+            platform_name = "Discord"
+        elif platform_choice == '2':
+            platform = "roblox"
+            platform_name = "Roblox"
+        else:
+            print(f"{Colors.RED}Invalid choice. Exiting.{Colors.ENDC}")
+            return
+        
+        print(f"\n{Colors.GREEN}Selected platform: {platform_name}{Colors.ENDC}")
+        
+        # Menu
+        print(f"\n{Colors.BOLD}Select an option:{Colors.ENDC}")
+        print(f"{Colors.CYAN}1.{Colors.ENDC} Check 3-character usernames")
+        print(f"{Colors.CYAN}2.{Colors.ENDC} Check 4-character usernames")
+        print(f"{Colors.CYAN}3.{Colors.ENDC} Check real words from English dictionary")
+        
+        choice = input(f"\n{Colors.YELLOW}Enter your choice (1/2/3): {Colors.ENDC}").strip()
+        
+        if choice == '1':
+            length = 3
+            print(f"\n{Colors.BOLD}Select character type:{Colors.ENDC}")
+            print(f"{Colors.CYAN}1.{Colors.ENDC} Letters only (a-z)")
+            print(f"{Colors.CYAN}2.{Colors.ENDC} Letters and numbers (a-z, 0-9)")
+            char_choice = input(f"\n{Colors.YELLOW}Enter your choice (1/2): {Colors.ENDC}").strip()
+            
+            letters_only = (char_choice == '1')
+            
+            if letters_only:
+                # If letters only, ask about repeating letters
+                print(f"\n{Colors.BOLD}Repeating letters?{Colors.ENDC}")
+                print(f"{Colors.CYAN}1.{Colors.ENDC} Yes (e.g., ggz, aab, kkz)")
+                print(f"{Colors.CYAN}2.{Colors.ENDC} No (all letters will be unique)")
+            else:
+                # If letters and numbers, ask about repeating characters (letters or numbers)
+                print(f"\n{Colors.BOLD}Repeating characters?{Colors.ENDC}")
+                print(f"{Colors.CYAN}1.{Colors.ENDC} Yes (e.g., 33b, 6nn, ggz, a22)")
+                print(f"{Colors.CYAN}2.{Colors.ENDC} No (all characters will be unique)")
+            repeat_choice = input(f"\n{Colors.YELLOW}Enter your choice (1/2): {Colors.ENDC}").strip()
+            
+            allow_repeats = (repeat_choice == '1')
+            replace_label = "letter" if letters_only else "character"
+            special_char = prompt_special_char(replace_label)
+            print(f"\n{Colors.CYAN}Note: For 3-character usernames, 100% of ALL possible combinations will be generated exhaustively (every single combination).{Colors.ENDC}")
+            num_to_check = int(input(f"\n{Colors.YELLOW}How many usernames do you want to check? (Enter 0 for all combinations): {Colors.ENDC}"))
+            usernames_to_check = generate_usernames(3, num_to_check if num_to_check > 0 else None, letters_only, allow_repeats, special_char)
+            print(f"{Colors.GREEN}Generated {len(usernames_to_check)} unique usernames to check.{Colors.ENDC}")
+            
+        elif choice == '2':
+            length = 4
+            print(f"\n{Colors.BOLD}Select character type:{Colors.ENDC}")
+            print(f"{Colors.CYAN}1.{Colors.ENDC} Letters only (a-z)")
+            print(f"{Colors.CYAN}2.{Colors.ENDC} Letters and numbers (a-z, 0-9)")
+            char_choice = input(f"\n{Colors.YELLOW}Enter your choice (1/2): {Colors.ENDC}").strip()
+            
+            letters_only = (char_choice == '1')
+            
+            if letters_only:
+                # If letters only, ask about repeating letters
+                print(f"\n{Colors.BOLD}Repeating letters?{Colors.ENDC}")
+                print(f"{Colors.CYAN}1.{Colors.ENDC} Yes (e.g., ggzk, aabz, kkzb)")
+                print(f"{Colors.CYAN}2.{Colors.ENDC} No (all letters will be unique)")
+            else:
+                # If letters and numbers, ask about repeating characters (letters or numbers)
+                print(f"\n{Colors.BOLD}Repeating characters?{Colors.ENDC}")
+                print(f"{Colors.CYAN}1.{Colors.ENDC} Yes (e.g., 33bn, 6nnz, ggzk, a22b)")
+                print(f"{Colors.CYAN}2.{Colors.ENDC} No (all characters must be unique)")
+            repeat_choice = input(f"\n{Colors.YELLOW}Enter your choice (1/2): {Colors.ENDC}").strip()
+            
+            allow_repeats = (repeat_choice == '1')
+            replace_label = "letter" if letters_only else "character"
+            special_char = prompt_special_char(replace_label)
+            print(f"\n{Colors.CYAN}Note: For 4-character usernames, 100% of ALL possible combinations will be generated exhaustively (every single combination).{Colors.ENDC}")
+            num_to_check = int(input(f"\n{Colors.YELLOW}How many usernames do you want to check? (Enter 0 for all combinations): {Colors.ENDC}"))
+            usernames_to_check = generate_usernames(4, num_to_check if num_to_check > 0 else None, letters_only, allow_repeats, special_char)
+            print(f"{Colors.GREEN}Generated {len(usernames_to_check)} unique usernames to check.{Colors.ENDC}")
+            
+        elif choice == '3':
+            print(f"\n{Colors.BOLD}Select word type:{Colors.ENDC}")
+            print(f"{Colors.CYAN}1.{Colors.ENDC} All English words (includes obscure/unknown words)")
+            print(f"{Colors.CYAN}2.{Colors.ENDC} Known English words (common, recognizable words)")
+            word_type_choice = input(f"\n{Colors.YELLOW}Enter your choice (1/2): {Colors.ENDC}").strip()
+            
+            comp_words_only = (word_type_choice == '2')
+            
+            print(f"\n{Colors.CYAN}Loading words...{Colors.ENDC}")
+            length_choice = input(f"{Colors.YELLOW}Maximum word length? (Enter number or press Enter for all): {Colors.ENDC}").strip()
+            selected_length = int(length_choice) if length_choice.isdigit() else None
+
+            if platform == "roblox":
+                # If user presses Enter, honor full range (1+) so nothing is filtered out.
+                # Roblox will still reject <3 or >20 characters during validation.
+                min_len = 1 if selected_length is None else 3
+                if selected_length is None:
+                    max_len = None
+                else:
+                    if selected_length > 20:
+                        print(f"{Colors.YELLOW}Roblox usernames max out at 20 characters. Limiting to 20.{Colors.ENDC}")
+                    max_len = min(selected_length, 20)
+            else:
+                min_len = 1
+                max_len = selected_length
+            
+            num_to_check = int(input(f"{Colors.YELLOW}How many words do you want to check? {Colors.ENDC}"))
+            length_param = selected_length if selected_length is not None else None
+            usernames_to_check = load_dictionary_words(length_param, num_to_check, comp_words_only, min_length=min_len, max_length=max_len)
+            
+            if not usernames_to_check:
+                print(f"{Colors.RED}No words found. Exiting.{Colors.ENDC}")
+                return
+        else:
+            print(f"{Colors.RED}Invalid choice. Exiting.{Colors.ENDC}")
+            return
+        
+        # Clear previous session results (always start fresh for this session)
+        if platform == "roblox":
+            session_file = 'available_roblox_usernames.txt'
+            total_file = 'available_roblox_usernames_total.txt'
+        else:
+            session_file = 'available_usernames.txt'
+            total_file = 'available_usernames_total.txt'
+        
+        # Warn user if file might be open
+        if os.path.exists(session_file):
+            try:
+                # Try to open the file to check if it's locked
+                test_file = open(session_file, 'r+')
+                test_file.close()
+            except (PermissionError, IOError, OSError):
+                print(f"{Colors.YELLOW}Warning: {session_file} appears to be open in another program (like Notepad).{Colors.ENDC}")
+                print(f"{Colors.YELLOW}Please close it before running the script to avoid file conflicts.{Colors.ENDC}")
+                print()
+        
+        if os.path.exists(session_file):
+            try:
+                os.remove(session_file)
+            except (PermissionError, IOError, OSError) as e:
+                print(f"{Colors.YELLOW}Warning: Could not remove {session_file}. The file may be open in Notepad or another program.{Colors.ENDC}")
+                print(f"{Colors.YELLOW}Please close the file and try again, or the script will append to the existing file.{Colors.ENDC}")
+            except Exception as e:
+                print(f"{Colors.YELLOW}Warning: Could not remove {session_file}: {e}{Colors.ENDC}")
+        
+        # Create/ensure session file exists (empty at start) with retry
+        file_created = False
+        for create_attempt in range(3):
+            try:
+                with open(session_file, 'w', encoding='utf-8') as file:
+                    pass  # Create empty file
+                file_created = True
+                break
+            except (PermissionError, IOError, OSError) as e:
+                if create_attempt < 2:
+                    time.sleep(0.2)
+                else:
+                    print(f"{Colors.YELLOW}Warning: Could not create {session_file}. The file may be open in Notepad.{Colors.ENDC}")
+                    print(f"{Colors.YELLOW}Please close Notepad and restart the script.{Colors.ENDC}")
+            except Exception as e:
+                if create_attempt < 2:
+                    time.sleep(0.2)
+                else:
+                    print(f"{Colors.RED}Error creating {session_file}: {e}{Colors.ENDC}")
+        
+        # Create/ensure total file exists (even if empty)
+        # Note: available_usernames_total.txt is never deleted - it accumulates all results
+        if not os.path.exists(total_file):
+            try:
+                with open(total_file, 'w', encoding='utf-8') as file:
+                    pass  # Create empty file
+            except Exception as e:
+                print(f"{Colors.RED}Error creating {total_file}: {e}{Colors.ENDC}")
+        
+        # Ask for execution mode
+        print(f"\n{Colors.BOLD}Select execution mode:{Colors.ENDC}")
+        print(f"{Colors.CYAN}1.{Colors.ENDC} Async mode (faster, better CPU utilization - recommended)")
+        print(f"{Colors.CYAN}2.{Colors.ENDC} Threading mode (traditional)")
+        mode_choice = input(f"\n{Colors.YELLOW}Enter your choice (1/2, default 1): {Colors.ENDC}").strip() or "1"
+        
+        use_async = (mode_choice == "1")
+        
+        if use_async:
+            print(f"{Colors.YELLOW}Note: Higher concurrency may cause rate limiting.{Colors.ENDC}")
+            print(f"{Colors.YELLOW}For maximum stability, use 20-30. For speed, use 50-100.{Colors.ENDC}")
+            num_concurrent = int(input(f"\n{Colors.YELLOW}How many concurrent requests? (recommended: 50-100 for speed, default: 50): {Colors.ENDC}") or "50")
+        else:
+            num_threads = int(input(f"\n{Colors.YELLOW}How many threads do you want to use? {Colors.ENDC}"))
+        
+        print(f"\n{Colors.BOLD}{Colors.GREEN}Starting username check...{Colors.ENDC}")
+        print(f"{Colors.BOLD}|        Username        | Status                           |{Colors.ENDC}")
+        print("=" * 60)
+        
+        # Reset counters and proxy mode
+        global rate_limit_detected, consecutive_errors
+        checked_count = 0
+        available_count = 0
+        DONE = False
+        use_proxy_mode = None  # Reset to auto-detect mode
+        rate_limit_detected = False  # Reset rate limit detection
+        consecutive_errors = 0  # Reset error counter
+        
+        # Start file writer thread first (used by both modes)
+        file_write_queue = Queue()
+        file_writer_thread = Thread(target=file_writer)
+        file_writer_thread.daemon = True
+        file_writer_thread.start()
+        
+        if use_async:
+            # Run async mode
+            try:
+                asyncio.run(async_main_runner(usernames_to_check, num_concurrent))
+            except KeyboardInterrupt:
+                print(f"\n{Colors.YELLOW}Interrupted by user{Colors.ENDC}")
+            finally:
+                DONE = True
+                if 'file_writer_thread' in globals() and file_writer_thread and file_writer_thread.is_alive():
+                    file_write_queue.join()
+                    file_writer_thread.join(timeout=2.0)
+        else:
+            # Run threading mode
+            # Start worker threads
+            threads = []
+            for _ in range(num_threads):
+                thread = Thread(target=worker)
+                thread.daemon = True
+                thread.start()
+                threads.append(thread)
+            
+            # Wait for all threads to complete
+            # Check if threads are still working by monitoring if usernames list is empty
+            while any(thread.is_alive() for thread in threads):
+                time.sleep(0.01)  # Reduced delay
+                # Double-check if all usernames are processed
+                with lock:
+                    if not usernames_to_check and all(not thread.is_alive() for thread in threads):
+                        break
+            
+            # Ensure all threads have finished
+            for thread in threads:
+                thread.join(timeout=1.0)
+            
+            # Mark as done and wait for file writer to finish
+            DONE = True
+            if 'file_writer_thread' in globals() and file_writer_thread and file_writer_thread.is_alive():
+                file_write_queue.join()  # Wait for all queued writes to complete
+                file_writer_thread.join(timeout=2.0)
+        
+        # Merge any remaining temp files
+        if platform == "roblox":
+            session_file = 'available_roblox_usernames.txt'
+            total_file = 'available_roblox_usernames_total.txt'
+        else:
+            session_file = 'available_usernames.txt'
+            total_file = 'available_usernames_total.txt'
+        for temp_file in [f"{session_file}.tmp", f"{total_file}.tmp"]:
+            if os.path.exists(temp_file):
+                try:
+                    with open(temp_file, 'r', encoding='utf-8') as tf:
+                        content = tf.read()
+                    if content:
+                        target = session_file if session_file in temp_file else total_file
+                        with open(target, 'a', encoding='utf-8') as file:
+                            file.write(content)
+                            file.flush()
+                    os.remove(temp_file)
+                except:
+                    pass
+        
+        # Ensure session file exists (create empty if no usernames were found)
+        if platform == "roblox":
+            if not os.path.exists('available_roblox_usernames.txt'):
+                with open('available_roblox_usernames.txt', 'w', encoding='utf-8') as file:
+                    pass  # Create empty file
+        else:
+            if not os.path.exists('available_usernames.txt'):
+                with open('available_usernames.txt', 'w', encoding='utf-8') as file:
+                    pass  # Create empty file
+        
+        # Final summary
+        print("\n" + "=" * 60)
+        print(f"{Colors.BOLD}{Colors.CYAN}Summary:{Colors.ENDC}")
+        print(f"{Colors.GREEN}Total checked: {checked_count}{Colors.ENDC}")
+        print(f"{Colors.GREEN}Available: {available_count}{Colors.ENDC}")
+        if platform == "roblox":
+            print(f"{Colors.YELLOW}Session results saved to: available_roblox_usernames.txt{Colors.ENDC}")
+            print(f"{Colors.YELLOW}All-time results saved to: available_roblox_usernames_total.txt{Colors.ENDC}")
+        else:
+            print(f"{Colors.YELLOW}Session results saved to: available_usernames.txt{Colors.ENDC}")
+            print(f"{Colors.YELLOW}All-time results saved to: available_usernames_total.txt{Colors.ENDC}")
+        print("=" * 60)
+        
+        input(f"\n{Colors.CYAN}Press Enter to exit...{Colors.ENDC}")
+
+    if __name__ == "__main__":
+        main()
+
+except KeyboardInterrupt:
+    print(f'\n\n{Colors.YELLOW}Exiting...{Colors.ENDC}')
+except Exception as e:
+    print(f'\n{Colors.RED}Error: {e}{Colors.ENDC}')
+    import traceback
+    traceback.print_exc()
+    input("Press Enter to exit...")```
